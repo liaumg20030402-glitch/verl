@@ -246,6 +246,9 @@ elif [[ "${REWARD_MODE}" == "genrm" ]]; then
         reward.reward_model.rollout.skip_tokenizer_init=False
         reward.custom_reward_function.path=${REWARD_FN_PATH}
         reward.custom_reward_function.name=${REWARD_FN_NAME}
+        +reward.custom_reward_function.reward_kwargs.grm_temperature=0.0
+        +reward.custom_reward_function.reward_kwargs.grm_top_p=1.0
+        +reward.custom_reward_function.reward_kwargs.grm_max_tokens=256
     )
 else
     echo "Invalid REWARD_MODE=${REWARD_MODE}, expected one of: rule|disrm|genrm"

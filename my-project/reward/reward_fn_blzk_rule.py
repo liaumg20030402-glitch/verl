@@ -2,7 +2,8 @@ import json
 import re
 
 
-# 严格输出格式：键集合必须完全匹配其一，并包含对应的结论字段。
+# 允许的 JSON 键组合及对应的结论字段名。
+# 键集合必须与模型输出完全匹配其中一种，才视为格式合法。
 _KEY_MODES = (
     ({"质控结论", "质控结论的可解释性", "质控结论的推理过程"}, "质控结论"),
     ({"质控结论", "质控结论的推理过程"}, "质控结论"),
@@ -13,7 +14,8 @@ _KEY_MODES = (
 
 
 def _normalize_target(text: str) -> str:
-    s = str(text or "").strip().replace("“", "").replace("”", "").replace('"', "")
+    """规范化标签：去除全角引号后返回"合格"或"不合格"，其余原样返回。"""
+    s = str(text or "").strip().replace("\u201c", "").replace("\u201d", "").replace('"', "")
     if s in ("合格",):
         return "合格"
     if s in ("不合格",):
@@ -22,21 +24,12 @@ def _normalize_target(text: str) -> str:
 
 
 def _sanitize_answer(text: str) -> str:
-    """清洗 Spark 特殊 token、Qwen3 思考标签及 Markdown 代码块。"""
+    """清洗模型输出：移除 <think>...</think> 思考块及 Markdown 代码围栏。
+    """
     s = str(text or "")
-    # <unused7> 常作为“思考内容/最终答案”分隔符，通常其后才是最终回答。
-    if "<unused7>" in s:
-        s = s.split("<unused7>")[-1]
-    s = s.replace("<unused6>", "")
-    s = s.replace("<end>", "")
-    s = s.replace("<ret>", "\n")
-    # 处理转义空白字符。
-    s = s.replace("\\r", "")
-    s = s.replace("\\n", "\n")
-    s = s.replace("\\t", " ")
-    # 移除 Qwen3 风格思考块。
+    # 移除思考块，只保留 </think> 之后的最终回答部分
     s = re.sub(r"<think>.*?</think>", "", s, flags=re.DOTALL)
-    # 若存在 markdown 代码块，优先提取其内部内容；否则仅去掉围栏标记。
+    # 若存在 markdown 代码块，优先提取其内部内容；否则仅去掉围栏标记
     fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", s, re.IGNORECASE)
     if fence_match:
         s = fence_match.group(1)
@@ -47,7 +40,7 @@ def _sanitize_answer(text: str) -> str:
 
 
 def _extract_first_json_object(text: str) -> str:
-    """提取第一个平衡的 JSON 对象，并正确忽略字符串内花括号。"""
+    """按花括号深度提取首个顶层 JSON 对象，忽略字符串内部花括号。"""
     s = str(text or "").strip()
     if not s:
         return ""
@@ -82,10 +75,10 @@ def _extract_first_json_object(text: str) -> str:
 def judge_blzk_answer(answer: str, target: str) -> tuple[float, dict]:
     """
     病历质控规则打分：
-    - 解析模型输出中的 JSON
-    - 键集合必须与预定义 key mode 完全一致
-    - 对应结论字段必须是“合格/不合格”
-    - 仅当预测结论与目标一致时记 1.0，否则 0.0
+    1. 清洗模型输出并提取 JSON 对象
+    2. 键集合必须与预定义 _KEY_MODES 之一完全一致
+    3. 对应结论字段须为"合格"或"不合格"
+    4. 预测结论与目标一致得 1.0，否则 0.0
     """
     clean_answer = _sanitize_answer(answer)
     target_norm = _normalize_target(target)
