@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+source /home3/medcog/jycai6/.bashrc
+conda activate verl_rl
+
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export VLLM_USE_V1=1
+export VLLM_ALLREDUCE_USE_SYMM_MEM=0
+
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+set -xeuo pipefail
+
+# ===== Reward mode 配置（显式绝对路径，不依赖脚本目录）=====
+# REWARD_MODE: rule | disrm | genrm
+REWARD_MODE=${REWARD_MODE:-genrm}
+# reward manager 与算法（如 GRPO）独立，这里默认用 dapo
+REWARD_MANAGER_NAME=${REWARD_MANAGER_NAME:-dapo}
+
+
+# 自定义奖励函数路径（rule/genrm 模式会用到）
+REWARD_FN_PATH=${REWARD_FN_PATH:-"/abs/path/to/your_rule_reward.py"}
+REWARD_FN_NAME=${REWARD_FN_NAME:-compute_score_blzk_rule}
+
+# 奖励模型路径：genrm/disrm 模式会启用 reward_model
+GRM_MODEL_PATH=${GRM_MODEL_PATH:-"/train21/medcog/permanent/leijiang19/pretrain_models/Qwen2.5-7B-Instruct"}
+DISRM_MODEL_PATH=${DISRM_MODEL_PATH:-"${GRM_MODEL_PATH}"}
+export GRM_MODEL_NAME="${GRM_MODEL_NAME:-${GRM_MODEL_PATH}}"
+
+# reward model rollout 资源
+GEN_RM_TP=${GEN_RM_TP:-1}
+GRM_GPU_MEM=${GRM_GPU_MEM:-0.35}
+
+export CUDA_HOME=/usr/local/cuda-12.9
+export PATH=${CUDA_HOME}/bin:${PATH}
+export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}
+
+# 编译缓存
+UNIQUE_ID=$(date +%Y%m%d_%H%M%S)
+tmp_run_dir="/tmp/jmli27_verl_run_${UNIQUE_ID}"
+export TRITON_CACHE_DIR="${tmp_run_dir}/triton_cache"
+export TORCHINDUCTOR_CACHE_DIR="${tmp_run_dir}/inductor_cache"
+export VLLM_CONFIG_ROOT="${tmp_run_dir}/vllm_config"
+mkdir -p "${TRITON_CACHE_DIR}" "${TORCHINDUCTOR_CACHE_DIR}" "${VLLM_CONFIG_ROOT}"
+
+rm -rf ~/.cache/vllm ~/.cache/torch/inductor ~/.triton/cache ~/.cache/flashinfer
+
+# export NNODES=$WORLD_SIZE
+# export NODE_RANK=$RANK
+# export MASTER_ADDR=$MASTER_ADDR
+# export MASTER_PORT=$MASTER_PORT
+
+# export GLOO_SOCKET_IFNAME=eno1
+# export NCCL_SOCKET_IFNAME=eno1
+
+# single node
+export RANK=0
+export NODE_RANK=$RANK
+export WORLD_SIZE=1
+export NNODES=$WORLD_SIZE
+export MASTER_PORT=34567
+export MASTER_ADDR=localhost
+
+export GLOO_SOCKET_IFNAME=eth0
+export NCCL_SOCKET_IFNAME=eth0
+
+export NCCL_NET=IB
+export NCCL_IB_HCA=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7
+export NCCL_IB_DISABLE=0
+export NCCL_P2P_DISABLE=0
+
+export CUDA_LAUNCH_BLOCKING=0
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+
+############################# Quick Config #############################
+TP=${TP:-2}
+PP=${PP:-1}
+CP=${CP:-1}
+EP=${EP:-8}
+ETP=${ETP:-1}
+GEN_TP=${GEN_TP:-8}
+
+ALL_OFFLOAD=${ALL_OFFLOAD:-True}
+
+rollout_name="vllm"
+project_name='verl_grpo_qwen3_5_35b_gsm8k'
+exp_name='verl_qwen3_5_35b_megatron_gsm8k'
+adv_estimator=grpo
+
+# ===== 本地模型路径 =====
+HF_MODEL_PATH=${HF_MODEL_PATH:-"/train21/medcog/permanent/leijiang19/pretrain_models/Qwen3.5-35B-A3B"}
+
+# ===== 本地 parquet 数据路径 =====
+train_path=${train_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/gsm8k/verl_gsm8k_train-system.parquet"}
+test_path=${test_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/gsm8k/verl_gsm8k_test-system.parquet"}
+
+BASE_OUT_DIR="/train21/medcog/permanent/jycai6/jmli27/"
+LOG_FILE="${BASE_OUT_DIR}/log/grpo_verl_megatron_qwen35_a3b_$(date +%Y%m%d_%H%M%S).log"
+CKPTS_DIR="${BASE_OUT_DIR}/output/${project_name}/$(date +%Y%m%d_%H%M%S)"
+
+############################# Parameter Arrays #############################
+
+DATA=(
+    data.train_files=${train_path}
+    data.val_files=${test_path}
+    data.train_batch_size=64
+    data.max_prompt_length=1024
+    data.max_response_length=1024
+    data.truncation='error'
+    data.filter_overlong_prompts=True
+    data.filter_overlong_prompts_workers=32
+    data.return_raw_chat=True
+    data.shuffle=True
+    # 固定打乱顺序，可复现
+    data.seed=42
+    # 限制训练集验证集大小，加快测试速度（可根据实际情况调整，-1为全部）
+    data.train_max_samples=-1
+    data.val_max_samples=-1
+    # +data.apply_chat_template_kwargs='{enable_thinking:False}'
+)
+
+MODEL=(
+    actor_rollout_ref.model.path=${HF_MODEL_PATH}
+    actor_rollout_ref.model.trust_remote_code=True
+    actor_rollout_ref.model.use_remove_padding=False
+    actor_rollout_ref.model.use_fused_kernels=False
+)
+
+ACTOR=(
+    actor_rollout_ref.actor.optim.lr=1e-6
+    actor_rollout_ref.actor.optim.lr_warmup_steps=0
+    actor_rollout_ref.actor.ppo_mini_batch_size=32
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096
+    actor_rollout_ref.actor.use_dynamic_bsz=False
+    actor_rollout_ref.actor.use_kl_loss=True
+    actor_rollout_ref.actor.kl_loss_coef=0.01
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl
+    actor_rollout_ref.actor.entropy_coeff=0
+
+    actor_rollout_ref.actor.megatron.use_mbridge=True
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=True
+    actor_rollout_ref.actor.megatron.use_remove_padding=False
+    actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TP}
+    actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${PP}
+    actor_rollout_ref.actor.megatron.context_parallel_size=${CP}
+    actor_rollout_ref.actor.megatron.expert_model_parallel_size=${EP}
+    actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${ETP}
+    actor_rollout_ref.actor.megatron.param_offload=${ALL_OFFLOAD}
+    actor_rollout_ref.actor.megatron.optimizer_offload=${ALL_OFFLOAD}
+    actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
+    actor_rollout_ref.actor.megatron.dtype=bfloat16
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=auto
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_aux_loss_coeff=0.01
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_z_loss_coeff=0.001
+    +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1
+    +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=True
+    +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
+    +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True
+    +actor_rollout_ref.actor.log_ratio_detail=True
+)
+
+ROLLOUT=(
+    actor_rollout_ref.rollout.name=${rollout_name}
+    actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP}
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6
+    actor_rollout_ref.rollout.n=5
+    actor_rollout_ref.rollout.mode=async
+    actor_rollout_ref.rollout.dtype=bfloat16
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096
+    # === 添加训练时的采样参数 ===
+    actor_rollout_ref.rollout.temperature=1.0
+    actor_rollout_ref.rollout.top_p=1.0
+    actor_rollout_ref.rollout.top_k=-1
+    +actor_rollout_ref.rollout.repetition_penalty=1.0
+
+    # === 单独控制验证 (val) 阶段的采样参数 ===
+    actor_rollout_ref.rollout.val_kwargs.n=1
+    actor_rollout_ref.rollout.val_kwargs.top_p=1.0
+    actor_rollout_ref.rollout.val_kwargs.top_k=-1
+    actor_rollout_ref.rollout.val_kwargs.temperature=0
+    +actor_rollout_ref.rollout.val_kwargs.repetition_penalty=1.05
+    # False uses greedy sampling
+    actor_rollout_ref.rollout.val_kwargs.do_sample=False
+)
+
+REF=(
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=False
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=4096
+    actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${TP}
+    actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${PP}
+    actor_rollout_ref.ref.megatron.context_parallel_size=${CP}
+    actor_rollout_ref.ref.megatron.expert_model_parallel_size=${EP}
+    actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${ETP}
+    actor_rollout_ref.ref.megatron.param_offload=${ALL_OFFLOAD}
+)
+
+ALGORITHM=(
+    algorithm.adv_estimator=${adv_estimator}
+    algorithm.use_kl_in_reward=False
+)
+
+# Reward 参数（支持 3 种模式：rule / disrm / genrm）
+REWARD=(
+    reward.num_workers=8
+    reward.reward_manager.name=${REWARD_MANAGER_NAME}
+)
+
+if [[ "${REWARD_MODE}" == "rule" ]]; then
+    # 规则函数：不启用 reward model，只走自定义函数
+    REWARD+=(
+        reward.reward_model.enable=False
+        reward.custom_reward_function.path=${REWARD_FN_PATH}
+        reward.custom_reward_function.name=${REWARD_FN_NAME}
+    )
+elif [[ "${REWARD_MODE}" == "disrm" ]]; then
+    # 判别式 RM：启用 reward model，不设置 custom_reward_function（走内置 compute_score_disrm）
+    REWARD+=(
+        reward.reward_model.enable=True
+        reward.reward_model.enable_resource_pool=False
+        reward.reward_model.model_path=${DISRM_MODEL_PATH}
+        reward.reward_model.rollout.name=${rollout_name}
+        reward.reward_model.rollout.dtype=bfloat16
+        reward.reward_model.rollout.tensor_model_parallel_size=${GEN_RM_TP}
+        reward.reward_model.rollout.gpu_memory_utilization=${GRM_GPU_MEM}
+        reward.reward_model.rollout.prompt_length=2048
+        reward.reward_model.rollout.response_length=1024
+        reward.reward_model.rollout.skip_tokenizer_init=False
+    )
+elif [[ "${REWARD_MODE}" == "genrm" ]]; then
+    # 生成式 RM：启用 reward model + 自定义函数（函数内走 /v1/chat/completions）
+    REWARD+=(
+        reward.reward_model.enable=True
+        reward.reward_model.enable_resource_pool=False
+        reward.reward_model.model_path=${GRM_MODEL_PATH}
+        reward.reward_model.rollout.name=${rollout_name}
+        reward.reward_model.rollout.dtype=bfloat16
+        reward.reward_model.rollout.tensor_model_parallel_size=${GEN_RM_TP}
+        reward.reward_model.rollout.gpu_memory_utilization=${GRM_GPU_MEM}
+        reward.reward_model.rollout.prompt_length=2048
+        reward.reward_model.rollout.response_length=1024
+        reward.reward_model.rollout.skip_tokenizer_init=False
+        reward.custom_reward_function.path=${REWARD_FN_PATH}
+        reward.custom_reward_function.name=${REWARD_FN_NAME}
+    )
+else
+    echo "Invalid REWARD_MODE=${REWARD_MODE}, expected one of: rule|disrm|genrm"
+    exit 1
+fi
+
+TRAINER=(
+    trainer.critic_warmup=0
+    trainer.logger='["console","tensorboard"]'
+    trainer.project_name=${project_name}
+    trainer.experiment_name=${exp_name}
+    trainer.default_local_dir=${CKPTS_DIR}
+    trainer.n_gpus_per_node=8
+    trainer.nnodes=1
+    trainer.save_freq=50
+    trainer.val_before_train=False
+    trainer.test_freq=20
+    trainer.total_epochs=1
+
+    # Number of generations to log during validation
+    trainer.log_val_generations=10
+    trainer.validation_data_dir=${CKPTS_DIR}/validation_data
+    trainer.rollout_data_dir=${CKPTS_DIR}/rollout_data
+)
+
+python3 -m verl.trainer.main_ppo \
+    --config-path=config \
+    --config-name='ppo_megatron_trainer.yaml' \
+    hydra.run.dir=${CKPTS_DIR}/hydra_logs \
+    "${DATA[@]}" \
+    "${ALGORITHM[@]}" \
+    "${REWARD[@]}" \
+    "${MODEL[@]}" \
+    "${ROLLOUT[@]}" \
+    "${ACTOR[@]}" \
+    "${REF[@]}" \
+    "${TRAINER[@]}" \
+    "$@" 2>&1 | tee "${LOG_FILE}"
