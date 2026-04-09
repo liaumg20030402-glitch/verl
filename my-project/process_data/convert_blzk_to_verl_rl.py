@@ -1,6 +1,6 @@
 """
 病历质控（blzk）数据转换脚本
-将讯飞星火格式的原始数据转换为 verl 训练所需的 parquet 格式。
+将原始数据转换为 verl 训练所需的 parquet 格式。
 
 用法：
     python convert_blzk_to_verl_rl.py [--train 输入] [--val 输入] \
@@ -29,22 +29,17 @@ def _clean_spark_text(text: str) -> str:
 
 
 def parse_spark_input(raw_input: str) -> tuple[str, str]:
-    """将讯飞星火格式的 input 字符串解析为 (system_content, user_content)。
+    """将 input 字符串解析为 (system_content, user_content)。
 
     原始数据格式固定为：<System>内容<end><User>内容<end><Bot>
     直接用 <end> 作为段落边界提取，无需多重回退逻辑。
-
-    【关于 <unused6>/<unused7> → <think></think> 的替换】
-    系统提示中含有讯飞格式的思考模式指令，例如：
-      "请以 <unused6> 开头，在结尾处以 <unused7> 标注结束"
-    此处将其替换为标准思考标签，使训练数据与 Qwen3 等模型格式对齐。
     """
     s = _clean_spark_text(raw_input)
 
     # 提取 System 内容：<System>...<end>
     system_m = re.search(r"<System>(.*?)<end>", s, re.DOTALL | re.IGNORECASE)
     system_content = system_m.group(1).strip() if system_m else ""
-    # 将星火思考 token 替换为标准思考标签
+    # 将思考 token 替换为标准思考标签
     system_content = system_content.replace("<unused6>", "<think>").replace("<unused7>", "</think>")
 
     # 提取 User 内容：<User>...<end>

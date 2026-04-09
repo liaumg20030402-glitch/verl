@@ -1,6 +1,6 @@
 """
 医考题目（medexam）数据转换脚本
-将讯飞星火格式的原始数据转换为 verl 训练所需的 parquet 格式。
+将原始数据转换为 verl 训练所需的 parquet 格式。
 
 用法：
     python convert_medexam_to_verl_rl.py [--train 输入] [--val 输入] \
@@ -29,15 +29,9 @@ def _clean_spark_text(text: str) -> str:
 
 
 def parse_spark_input(raw_input: str) -> tuple[str, str]:
-    """将讯飞星火格式的 input 字符串解析为 (system_content, user_content)。
+    """将input 字符串解析为 (system_content, user_content)。
 
     原始数据格式固定为：<System>内容<end><User>内容<end><Bot>
-    直接用 <end> 作为段落边界提取，无需多重回退逻辑。
-
-    【关于 <unused6>/<unused7> → <think></think> 的替换】
-    系统提示中含有讯飞格式的思考模式指令，例如：
-      "请以 <unused6> 开头，在结尾处以 <unused7> 标注结束"
-    此处将其替换为标准思考标签，使训练数据与 Qwen3 等模型格式对齐。
     """
     s = _clean_spark_text(raw_input)
 
@@ -68,7 +62,7 @@ def _normalize_category(category: str) -> str:
 
 def _normalize_target(target: str) -> str:
     """将答案选项规范化为"去重 + 字母排序"的大写字符串。
-    确保 'CBA' 与 'ABC' 归一化后完全一致，支持超出 E 的长选项题。
+    确保 'CBA' 与 'ABC' 归一化后完全一致。
     """
     t = str(target or "").strip().upper().replace(" ", "").replace(",", "")
     t = re.sub(r"[^A-Z]", "", t)
