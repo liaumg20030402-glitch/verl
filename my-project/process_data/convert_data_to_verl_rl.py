@@ -74,7 +74,24 @@ def _read_df(input_path: str) -> pd.DataFrame:
     if input_path.endswith(".parquet"):
         return pd.read_parquet(input_path)
     if input_path.endswith(".json"):
-        return pd.read_json(input_path)
+        # 读取首个非空白字符：
+        # - '[' 开头：标准 JSON（通常是数组）
+        # - '{' 开头：按 JSONL（每行一个 JSON 对象）读取
+        with open(input_path, "r", encoding="utf-8") as f:
+            first_non_ws = ""
+            while True:
+                ch = f.read(1)
+                if ch == "":
+                    break
+                if not ch.isspace():
+                    first_non_ws = ch
+                    break
+
+        if first_non_ws == "[":
+            return pd.read_json(input_path)
+        if first_non_ws == "{":
+            return pd.read_json(input_path, lines=True)
+        raise ValueError(f"无法识别 JSON 文件结构: {input_path}")
     if input_path.endswith(".jsonl"):
         return pd.read_json(input_path, lines=True)
     if input_path.endswith(".csv"):
@@ -103,9 +120,9 @@ def convert_medexam_row(row: dict) -> dict | None:
     user_content = parse_spark_input(row.get("input", ""))[1]
 
     return {
-        "data_source": raw_category or "med-exam",
+        "data_source": "med-exam",
         "prompt": _build_prompt(row.get("input", "")),
-        "ability": "med_exam",
+        "ability": "med-exam",
         "reward_model": {
             "style": "model",
             "ground_truth": target,  # 不再做字母排序/去重，直接保留原始答案
@@ -127,7 +144,7 @@ def convert_blzk_row(row: dict) -> dict | None:
         return None
 
     return {
-        "data_source": str(row.get("category", "med-blzk")),
+        "data_source": "med-blzk",
         "prompt": _build_prompt(row.get("input", "")),
         "ability": "med-blzk",
         "reward_model": {
@@ -140,14 +157,14 @@ def convert_blzk_row(row: dict) -> dict | None:
             "hardness": str(row.get("hardness", "")),
             "target": target,
             "type": str(row.get("type", "")),
-            "质控项类型"：str(row.get("质控项类型", "")),
+            "质控项类型": str(row.get("质控项类型", "")),
         },
     }
 
 
 def convert_row(row: dict, task_type: str) -> dict | None:
     """根据任务类型路由到对应转换函数。"""
-    if task_type == "medexam":
+    if task_type == "med-exam":
         return convert_medexam_row(row)
     if task_type == "blzk":
         return convert_blzk_row(row)

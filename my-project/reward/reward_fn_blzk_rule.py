@@ -83,7 +83,7 @@ def judge_blzk_answer(answer: str, target: str) -> tuple[float, dict]:
     clean_answer = _sanitize_answer(answer)
     target_norm = _normalize_target(target)
     if target_norm not in {"合格", "不合格"}:
-        return 0.0, {"reason": "invalid_target", "target": target_norm}
+        return 0.0, {"reason": "invalid_target"}
 
     json_text = _extract_first_json_object(clean_answer)
     if not json_text:
@@ -104,21 +104,16 @@ def judge_blzk_answer(answer: str, target: str) -> tuple[float, dict]:
             if model_conclusion not in {"合格", "不合格"}:
                 return 0.0, {
                     "reason": "invalid_model_conclusion",
-                    "pred": model_conclusion,
-                    "keys": sorted(list(keys)),
-                    "conclusion_key": conclusion_key,
+                    "pred": model_conclusion
                 }
 
             hit = model_conclusion == target_norm
             return (1.0 if hit else 0.0), {
                 "reason": "ok" if hit else "mismatch",
-                "pred": model_conclusion,
-                "target": target_norm,
-                "keys": sorted(list(keys)),
-                "conclusion_key": conclusion_key,
+                "pred": model_conclusion
             }
 
-    return 0.0, {"reason": "key_mode_not_matched", "keys": sorted(list(keys))}
+    return 0.0, {"reason": "key_mode_not_matched"}
 
 
 def compute_score_blzk_rule(
@@ -139,10 +134,6 @@ def compute_score_blzk_rule(
     score, detail = judge_blzk_answer(solution_str, target)
     return {
         "score": float(score),
-        "acc": bool(score > 0.5),
         "pred": detail.get("pred", ""),
-        "target": detail.get("target", _normalize_target(target)),
         "judge_reason": detail.get("reason", "unknown"),
-        "conclusion_key": detail.get("conclusion_key", ""),
-        "data_source": str(data_source),
     }

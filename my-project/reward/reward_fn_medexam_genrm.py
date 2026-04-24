@@ -1,7 +1,6 @@
 import json
 import os
 import re
-from pathlib import Path
 
 import aiohttp
 from transformers import PreTrainedTokenizer
@@ -9,8 +8,8 @@ from transformers import PreTrainedTokenizer
 
 _SCORE_RE = re.compile(r"\b(?:0(?:\.0+)?|0\.5|1(?:\.0+)?)\b")
 
-# prompt 模板文件路径（与本脚本同级的 prompts 子目录）
-_PROMPT_FILE = Path(__file__).parent / "prompts" / "medexam_judge_prompt.md"
+# prompt 模板文件路径（直接指定绝对路径）
+_PROMPT_FILE = "/train21/medcog/permanent/jycai6/jmli27/verl/verl/my-project/reward/prompts/medexam_judge_prompt.md"
 
 # 模块级缓存，避免每次调用都重复读取磁盘
 _JUDGE_PROMPT_TEMPLATE: str | None = None
@@ -234,18 +233,14 @@ async def compute_score_medexam_genrm(
 
     extracted_answer, reasoning, score = _parse_judge_fields(judge_resp)
     pred = _normalize_option_answer(extracted_answer)
-    # 本地精确匹配作为辅助指标，不参与训练奖励
-    local_exact = float(pred == gt and pred != "")
+    # 保证 score 是可比较的数值，避免异常值污染训练
+    try:
+        score = float(score)
+    except Exception:
+        score = 0.0
 
     return {
         "score": score,
-        "acc": bool(score > 0.5),
         "pred": pred,
-        "target": gt,
         "reasoning": reasoning,
-        "extracted_answer": extracted_answer,
-        "local_exact": local_exact,
-        "genrm_response": judge_resp,
-        "genrm_score": score,
-        "data_source": str(data_source),
     }
