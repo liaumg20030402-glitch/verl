@@ -9,15 +9,15 @@ export VLLM_ALLREDUCE_USE_SYMM_MEM=0
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 set -xeuo pipefail
 
-# ===== Reward mode 配置（显式绝对路径，不依赖脚本目录）=====
+# ===== Reward mode 配置 =====
 # REWARD_MODE: rule | disrm | genrm
-REWARD_MODE=${REWARD_MODE:-genrm}
-# reward manager 与算法（如 GRPO）独立，这里默认用 dapo
+REWARD_MODE=${REWARD_MODE:-rule}
+# reward manager 
 REWARD_MANAGER_NAME=${REWARD_MANAGER_NAME:-dapo}
 
 
 # 自定义奖励函数路径（rule/genrm 模式会用到）
-REWARD_FN_PATH=${REWARD_FN_PATH:-"/train21/medcog/permanent/jycai6/jmli27/reward_fn_blzk_rule.py"}
+REWARD_FN_PATH=${REWARD_FN_PATH:-"/train21/medcog/permanent/jycai6/jmli27/reward/reward_fn_blzk_rule.py"}
 REWARD_FN_NAME=${REWARD_FN_NAME:-compute_score_blzk_rule}
 
 # 奖励模型路径：genrm/disrm 模式会启用 reward_model
@@ -81,7 +81,7 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 ############################# Ray 集群初始化（多机）#############################
 # 单机（NNODES=1）：跳过这整段，main_ppo.py 里的 ray.init() 会自己起一个本地集群。
 # 多机：调度器会在每个节点上同时运行本脚本。RANK=0 作为 head，RANK>0 作为 worker。
-RAY_PORT=${RAY_PORT:-6380}
+RAY_PORT=${RAY_PORT:-$((${MASTER_PORT:-6379} + 1))}
 RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-8265}
 EXPECTED_GPUS=$(( NNODES * 8 ))
 
@@ -172,10 +172,9 @@ GEN_TP=${GEN_TP:-8}
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 
-
 rollout_name="vllm"
 project_name='verl_grpo_qwen3_5_35b_blzk'
-exp_name="verl_qwen3_5_35b_megatron_blzk_rule_${UNIQUE_ID}"
+exp_name="verl_qwen3_5_35b_megatron_blzk_rule_${UNIQUE_ID}_multi"
 adv_estimator=grpo
 
 # ===== 本地模型路径 =====
@@ -183,11 +182,11 @@ HF_MODEL_PATH=${HF_MODEL_PATH:-"/train21/medcog/permanent/leijiang19/pretrain_mo
 
 # ===== 本地 parquet 数据路径 =====
 train_path=${train_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_train_fast_verl.parquet"}
-test_path=${test_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_test_fast_verl.parquet"}
+test_path=${test_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_val_fast_verl.parquet"}
 
 BASE_OUT_DIR="/train21/medcog/permanent/jycai6/jmli27/"
-LOG_FILE="${BASE_OUT_DIR}/log/${project_name}/grpo_verl_megatron_qwen35_a3b_${UNIQUE_ID}.log"
-CKPTS_DIR="${BASE_OUT_DIR}/output/${project_name}/${UNIQUE_ID}"
+LOG_FILE="${BASE_OUT_DIR}/log/${project_name}/grpo_verl_megatron_qwen35_a3b_${UNIQUE_ID}_multi.log"
+CKPTS_DIR="${BASE_OUT_DIR}/output/${project_name}/${UNIQUE_ID}_multi"
 mkdir -p "$(dirname "${LOG_FILE}")" "$(dirname "${CKPTS_DIR}")"
 
 ############################# Parameter Arrays #############################
@@ -196,7 +195,8 @@ DATA=(
     data.train_files=${train_path}
     data.val_files=${test_path}
     data.train_batch_size=64
-    data.max_prompt_length=4096
+    # blzk有几百条大于4096
+    data.max_prompt_length=2048
     data.max_response_length=1024
     data.truncation='error'
     data.filter_overlong_prompts=True
@@ -255,8 +255,8 @@ ACTOR=(
 ROLLOUT=(
     actor_rollout_ref.rollout.name=${rollout_name}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP}
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6
-    actor_rollout_ref.rollout.n=8
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.5
+    actor_rollout_ref.rollout.n=3
     actor_rollout_ref.rollout.mode=async
     actor_rollout_ref.rollout.dtype=bfloat16
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
