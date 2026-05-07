@@ -35,6 +35,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name, is_npu_available, set_expandable_segments
 from verl.utils.distributed import initialize_global_process_group_ray, set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
+from verl.utils.import_utils import import_external_libs
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.metric.utils import Metric
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage
@@ -116,7 +117,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self.engine_config.use_remove_padding = self.model_config.get("use_remove_padding", False)
         self.engine_config.use_fused_kernels = self.model_config.get("use_fused_kernels", False)
 
-        # TODO: add DistProfilerExtension
         self.profiler_config = self.config.profiler_config
         if self.profiler_config is not None:
             self.profiler_tool_config = self.profiler_config.tool_config.get(self.profiler_config.tool, {})
@@ -147,7 +147,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         if hasattr(self.model_config, "hf_config"):
             self.flops_counter = FlopsCounter(self.model_config.hf_config)
         else:
-            # for Diffusion models, FlopsCounter is not supported yet.
             self.flops_counter = None
 
         self.loss_fn = None
@@ -200,6 +199,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         # For grad_norm, we do not perform all reduce because it is already been done when clipping grad
         grad_norm = metrics.pop("grad_norm", None)
+        if isinstance(grad_norm, torch.Tensor):
+            grad_norm = grad_norm.detach().item()
         lr = metrics.pop("lr", None)
 
         # For other metrics, we perform all gather in dp group (only if DP > 1)
@@ -323,6 +324,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
+    @DistProfiler.annotate(color="red", role="train_batch")
     def train_batch(self, data: TensorDict) -> TensorDict:
         assert self.loss_fn is not None, "loss function can't be None when calling train_batch"
         assert not self.engine_config.forward_only, "Can't run `train_batch` when forward_only is in the engine config."
@@ -512,7 +514,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(
-                model_type="language_model",
+                model_type=ref_config.model_config.get("model_type", "language_model"),
                 model_config=ref_config.model_config,
                 engine_config=ref_config.engine,
                 optimizer_config=ref_config.optim,
@@ -525,7 +527,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             ref_training_config.engine_config.infer_micro_batch_size_per_gpu = (
                 self.config.ref.ppo_micro_batch_size_per_gpu
             )
-            ref_training_config.engine_config.use_remove_padding = model_config.use_remove_padding
+            ref_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
 
             self.ref = TrainingWorker(config=ref_training_config)
             self.ref.reset()
@@ -540,7 +542,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
             actor_training_config = TrainingWorkerConfig(
-                model_type="language_model",
+                model_type=actor_config.model_config.get("model_type", "language_model"),
                 model_config=actor_config.model_config,
                 engine_config=actor_config.engine,
                 optimizer_config=actor_config.optim,
@@ -561,7 +563,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             actor_training_config.engine_config.micro_batch_size_per_gpu = (
                 self.config.actor.ppo_micro_batch_size_per_gpu
             )
-            actor_training_config.engine_config.use_remove_padding = model_config.use_remove_padding
+            actor_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
 
             if self.config.actor.use_dynamic_bsz:
                 assert self.config.rollout.log_prob_max_token_len_per_gpu is not None
@@ -614,6 +616,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             backend = checkpoint_engine_config.backend
             bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
             engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
+            # If custom_backend_module is set, import it so plugins can register
+            # in CheckpointEngineRegistry before the backend is instantiated.
+            import_external_libs(checkpoint_engine_config.custom_backend_module or None)
             self.checkpoint_engine = CheckpointEngineRegistry.new(
                 backend, is_master=(torch.distributed.get_rank() == 0), bucket_size=bucket_size, **engine_kwargs
             )

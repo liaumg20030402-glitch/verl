@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from .base import BaseEngine, EngineRegistry
-from .fsdp import DiffusersFSDPEngine, FSDPEngine, FSDPEngineWithLMHead
+from .fsdp import FSDPEngine, FSDPEngineWithLMHead
 
 __all__ = [
     "BaseEngine",
@@ -20,9 +20,6 @@ __all__ = [
     "FSDPEngine",
     "FSDPEngineWithLMHead",
 ]
-
-if DiffusersFSDPEngine is not None:
-    __all__.append("DiffusersFSDPEngine")
 
 try:
     from .torchtitan import TorchTitanEngine, TorchTitanEngineWithLMHead
@@ -50,11 +47,12 @@ except ImportError:
 
 # Mindspeed must be imported before Megatron to ensure the related monkey patches take effect as expected
 try:
-    from .mindspeed import MindspeedEngineWithLMHead
+    from .mindspeed import MindspeedEngineWithLMHead, MindSpeedLLMEngineWithLMHead
 
-    __all__ += ["MindspeedEngineWithLMHead"]
+    __all__ += ["MindspeedEngineWithLMHead", "MindSpeedLLMEngineWithLMHead"]
 except ImportError:
     MindspeedEngineWithLMHead = None
+    MindSpeedLLMEngineWithLMHead = None
 
 try:
     from .megatron import MegatronEngine, MegatronEngineWithLMHead

@@ -21,11 +21,18 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import BaseModelConfig, CheckpointConfig
 from verl.utils.profiler import ProfilerConfig
 
-from .engine import FSDPEngineConfig, McoreEngineConfig, TorchtitanEngineConfig
+from .engine import FSDPEngineConfig, McoreEngineConfig, MindSpeedEngineConfig, TorchtitanEngineConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
-__all__ = ["CriticConfig", "FSDPCriticConfig", "McoreCriticConfig", "TorchTitanCriticConfig", "FSDPCriticModelCfg"]
+__all__ = [
+    "CriticConfig",
+    "FSDPCriticConfig",
+    "McoreCriticConfig",
+    "TorchTitanCriticConfig",
+    "FSDPCriticModelCfg",
+    "MindSpeedCriticConfig",
+]
 
 
 @dataclass
@@ -197,6 +204,10 @@ class FSDPCriticConfig(CriticConfig):
         """Validate FSDP critic configuration parameters."""
         super().__post_init__()
         self.engine = self.fsdp
+        # Sync strategy to engine config so engine_workers can pick the right FSDP version.
+        # EngineConfig.strategy defaults to None, so without this, engine_workers.py always
+        # falls back to FSDP1 even when critic.strategy="fsdp2".
+        object.__setattr__(self.engine, "strategy", self.strategy)
 
         if self.strategy in {"fsdp", "fsdp2"}:
             if self.ulysses_sequence_parallel_size > 1:
@@ -265,3 +276,25 @@ class FSDPCriticModelCfg(BaseModelConfig):
     target_modules: str | list[str] = "all-linear"
     # TiledMLP configuration for memory-efficient MLP computation
     tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})
+
+
+@dataclass
+class MindSpeedCriticConfig(CriticConfig):
+    """Configuration for mindspeed-based critic model training.
+
+    The inheritance from CriticConfig provides all base critic configuration plus mindspeed-specific settings.
+
+    Args:
+        nccl_timeout (int): NCCL timeout in seconds for distributed operations.
+        mindspeed (Dict[str, Any]): mindspeed-specific parallelism settings.
+        load_weight (bool): Whether to load initial weights.
+    """
+
+    strategy: str = "mindspeed"
+    nccl_timeout: int = 600
+    mindspeed: MindSpeedEngineConfig = field(default_factory=MindSpeedEngineConfig)
+    load_weight: bool = True
+
+    def validate(self, n_gpus: int, train_batch_size: int):
+        """Validate mindspeed critic configuration with runtime parameters."""
+        super().validate(n_gpus, train_batch_size)

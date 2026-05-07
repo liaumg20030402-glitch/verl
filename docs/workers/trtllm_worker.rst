@@ -1,7 +1,7 @@
 TensorRT-LLM Backend
 ====================
 
-Last updated: 12/31/2025.
+Last updated: 4/2/2026.
 
 **Authored By TensorRT-LLM Team**
 
@@ -14,7 +14,7 @@ The TensorRT-LLM rollout engine primarily targets the colocated mode. Instead of
 
 Installation
 ------------
-We provide ``docker/Dockerfile.stable.trtllm`` for building a docker image with TensorRT-LLM pre-installed. The verl integration is supported from ``nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6``, and you can choose other TensorRT-LLM versions via ``TRTLLM_BASE_IMAGE`` from the `NGC Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tensorrt-llm/containers/release>`_.
+We provide `docker/Dockerfile.stable.trtllm <https://github.com/verl-project/verl/blob/main/docker/Dockerfile.stable.trtllm>`_ for building a docker image with TensorRT-LLM pre-installed. The verl integration is supported from ``nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6``, and you can choose other TensorRT-LLM versions via ``TRTLLM_BASE_IMAGE`` from the `NGC Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tensorrt-llm/containers/release>`_.
 
 Alternatively, refer to the `TensorRT-LLM installation guide <https://nvidia.github.io/TensorRT-LLM/installation/index.html>`_ for compatible environments if you want to build your own.
 
@@ -44,19 +44,14 @@ We provide the following GRPO recipe scripts for you to test the performance and
 .. code-block:: bash
 
     ## For FSDP training engine
-    bash examples/grpo_trainer/run_qwen2-7b_math_trtllm.sh
+    INFER_BACKEND=trtllm bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
     ## For Megatron-Core training engine
-    bash examples/grpo_trainer/run_qwen2-7b_math_megatron_trtllm.sh
+    INFER_BACKEND=trtllm bash examples/grpo_trainer/run_qwen3_8b_megatron.sh
 
 Using TensorRT-LLM as the Rollout Engine for DAPO
 -------------------------------------------------
 
-We provide a DAPO recipe script ``recipe/dapo/test_dapo_7b_math_trtllm.sh``.
-
 .. code-block:: bash
 
-    ## For FSDP training engine
-    bash recipe/dapo/test_dapo_7b_math_trtllm.sh
-    ## For Megatron-Core training engine
-    TRAIN_ENGINE=megatron bash recipe/dapo/test_dapo_7b_math_trtllm.sh
-
+    # For Megatron-Core training engine with FP8 rollout
+    INFER_BACKEND=trtllm ROLLOUT_QUANTIZATION=fp8 bash examples/grpo_trainer/run_qwen3_30b_a3b_megatron.sh
