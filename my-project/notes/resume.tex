@@ -1,0 +1,153 @@
+% !TEX program = xelatex
+% 编译方式:在 Overleaf 中将编译器设置为 XeLaTeX
+\documentclass[11pt,a4paper]{article}
+
+% ============ 宏包 ============
+\usepackage[UTF8]{ctex}               % 中文支持
+\usepackage[left=1.8cm,right=1.8cm,top=1.8cm,bottom=1.8cm]{geometry}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{tikz}
+\usepackage{fontawesome5}             % 图标(可选)
+\usepackage{hyperref}
+\usepackage{array}
+\usepackage{tabularx}
+
+% ============ 颜色定义 ============
+\definecolor{themecolor}{RGB}{196, 30, 58}   % 红色主题
+\definecolor{tagcolor}{RGB}{196, 30, 58}
+\definecolor{textgray}{RGB}{80, 80, 80}
+
+% ============ 超链接样式 ============
+\hypersetup{
+    colorlinks=true,
+    urlcolor=themecolor,
+    linkcolor=themecolor
+}
+
+% ============ 段落设置 ============
+\setlength{\parindent}{0pt}
+\pagestyle{empty}
+
+% ============ 章节标题样式 ============
+\titleformat{\section}
+    {\color{white}\bfseries\large}
+    {}
+    {0pt}
+    {\colorbox{themecolor}{\parbox{\dimexpr\textwidth-2\fboxsep}{\strut #1}}}
+\titlespacing*{\section}{0pt}{12pt}{6pt}
+
+% ============ 小标签(C9、985) ============
+\newcommand{\tag}[1]{%
+    \tikz[baseline=(X.base)]\node[rectangle, rounded corners=2pt,
+    fill=tagcolor, text=white, inner sep=2pt, font=\footnotesize\bfseries] (X) {#1};%
+}
+
+% ============ 条目标题(左标题 + 右日期) ============
+\newcommand{\entry}[2]{%
+    \noindent\textbf{#1}\hfill{\color{textgray}#2}\\
+}
+
+\newcommand{\subentry}[2]{%
+    \noindent#1\hfill{\color{textgray}#2}\\
+}
+
+% ============ 列表样式 ============
+\setlist[itemize]{leftmargin=1.2em, itemsep=2pt, topsep=2pt, parsep=0pt}
+
+% ============ 开始文档 ============
+\begin{document}
+
+% ====================== 个人信息 ======================
+\begin{minipage}[t]{0.75\textwidth}
+    \vspace{0pt}
+    {\Huge\bfseries\color{themecolor} 李金美}\\[8pt]
+    \faPhone\ 18790566306 \quad \faEnvelope\ 18790566306@163.com\\[4pt]
+    23岁 \ | \ 女 \ | \ 籍贯:河南新乡 \ | \ 汉族 \ | \ 中共党员
+\end{minipage}%
+\hfill
+\begin{minipage}[t]{0.22\textwidth}
+    \vspace{0pt}
+    \begin{flushright}
+    % 如果你有个人照片,将下一行替换为 \includegraphics[width=3cm]{photo.jpg}
+    \framebox[3cm]{\rule{0pt}{3.6cm}\hspace{-3cm}\parbox{3cm}{\centering \small 照片\\(可替换)}}
+    \end{flushright}
+\end{minipage}
+
+\vspace{6pt}
+
+% ====================== 教育背景 ======================
+\section{教育背景}
+
+\entry{中国科学技术大学 \tag{C9} \tag{985}}{2025年09月 - 至今}
+\subentry{网络空间安全专业 \ 硕士（研一） \ 网络空间安全学院}{合肥}
+\begin{itemize}
+    \item \textbf{保研学硕,中国科学技术大学硕士一等学业奖学金}
+\end{itemize}
+
+\vspace{4pt}
+
+\entry{武汉大学 \tag{985}}{2021年09月 - 2025年06月}
+\subentry{网络空间安全专业 \ 本科 \ 国家网络安全学院}{武汉}
+\begin{itemize}
+    \item \textbf{GPA:3.92/4.0(前3\%)}
+    \item \textbf{主修课程:}编译原理(93)、计算机网络(97)、计算机组成原理(95)、数据结构(91)、操作系统原理及安全(93)、密码学(95)、数据库系统及安全(95)、汇编语言及逆向分析(91)等
+    \item \textbf{奖项荣誉:}国家奖学金、武汉大学优秀本科毕业生、雷军计算机创新与发展基金、武汉大学三好学生、武汉大学优秀学生奖学金
+    \item \textbf{科研成果:}发明专利《基于声学传感的智能用户认证方法、设备及软件产品》第一作者,授权专利号:ZL 202410993112.5;2024年第十七届全国大学生信息安全竞赛(A类学科竞赛)国家级一等奖;2024年第十七届中国大学生计算机设计大赛(A类学科竞赛)中南地区赛一等奖
+\end{itemize}
+
+% ====================== 实习经历 ======================
+\section{实习经历}
+
+\entry{科大讯飞股份有限公司 ---- 讯飞医疗大模型实习}{2025年11月 - 2026年04月}
+
+\textbf{病历质控规则奖励 GRPO 训练（端到端打通 post-training 链路）}
+\begin{itemize}
+    \item \textbf{数据构造与归因分析:}基于线上 bad case 对 Qwen3.5-MoE 思维链进行归因分析,抽象出覆盖推理正确性、规则逻辑遵循、逻辑连贯性、知识正确性、关键步骤覆盖等 10 个维度的 step-level 错误标签;抽样分析 500 条 CoT、15{,}249 个推理步骤,定位到错误主要集中在前 3 步,为奖励函数设计提供依据。
+    \item \textbf{规则奖励函数设计:}基于 JSON 字段抽取 + 结论匹配的混合规则实现 \texttt{compute\_score\_blzk\_rule},覆盖格式合法性、关键字段完整性、最终结论一致性等多重约束,产出 0/1 二元奖励信号,并附加可观测的 \texttt{judge\_reason} 分类(ok / mismatch / json\_not\_found / json\_parse\_failed 等)用于训练监控。
+    \item \textbf{GRPO 训练实现:}基于 verl 框架在 H200 多机集群上跑通 Qwen3.5-35B-A3B (MoE) 的 GRPO 训练,配置 TP=2 / EP=8 / PP=1 并启用 Megatron 后端 + vLLM 异步 rollout;采用 dapo reward manager 配合 overlong reward shaping 防止长 response 截断带来的奖励噪声。
+    \item \textbf{训练效果:}在内部病历质控测试集上,reward mean 从 \textbf{[待填:基线值]} 提升至 \textbf{[待填:训练后值]}(\textbf{[待填:相对提升 \%]}),judge\_reason 中 \texttt{json\_not\_found} 比例从 \textbf{[待填]\%} 下降至 \textbf{[待填]\%},验证了规则奖励 + GRPO 在结构化输出任务上的有效性。
+\end{itemize}
+
+\textbf{医考选择题生成式奖励模型 GRPO 训练（进行中）}
+\begin{itemize}
+    \item \textbf{数据构造:}整理构造 12{,}950 条中文多选题与 65{,}293 条中英文单选题,将单选题筛选并改写为开放式问答,最终保留 53{,}668 条高质量医考开放式 QA(中文 39{,}095 / 英文 14{,}573);组织多模型采样回答并用 LLM 自动打分,构建训练集 20{,}000 query × 8 answers = 160{,}000 条偏好数据候选集与 4{,}000 条验证集。
+    \item \textbf{生成式奖励模型(GenRM)设计:}相比规则匹配难以处理开放式答案的语义等价问题,采用 Qwen2.5-7B-Instruct 作为 GenRM 后端,以 \texttt{/v1/chat/completions} 接口异步并发打分,在 verl 中通过 \texttt{REWARD\_MODE=genrm} 同时启用 \texttt{reward\_model.rollout} 与 \texttt{custom\_reward\_function} 双管道。
+    \item \textbf{对比实验设计(计划):}规则匹配 baseline / 判别式 RM / 生成式 RM 三组对比,关注最终 acc、reward hacking 倾向、推理步骤合理性等指标,\textbf{[待补充实验结果]}。
+\end{itemize}
+
+\textbf{Qwen3.5-MoE 多机 RL 训练环境搭建与工程化}
+\begin{itemize}
+    \item 在 H200 集群(2 机 16 卡,141GB/卡)部署 Swift / verl / vLLM / Megatron-LM 全套 post-training 工具链,通过自研 ky 调度器手工编排 Ray 集群(RANK=0 head + RANK>0 worker),修复多机部署中 \textbf{多网卡 IP 解析、Ray 节点资源 race、shell 解析 Ray INFO 污染、Hydra struct mode、flashinfer JIT 在 NFS 上并发竞争}等 6 类关键工程问题,打通 35B MoE GRPO 训练。
+    \item 针对 Qwen3.5 GDN 线性注意力不支持 packed sequence (THD) 格式的架构限制,锁定 \texttt{use\_remove\_padding=False} + \texttt{use\_dynamic\_bsz=False} 走 BSHD 路径,并通过节点本地编译缓存(TRITON / FLASHINFER / XDG\_CACHE) 规避 NFS race。
+    \item 熟悉 RL 训练框架的核心配置与兼容性权衡:三层 batch (train / mini / micro)、KL 加 loss vs 加 reward、低方差 KL 估计器(k3)、PPO clip-higher、动态 batch、reward manager 选型(naive vs dapo)、attention backend 选型等。
+\end{itemize}
+
+\textbf{医疗多模态大语言模型自动评测与错误分析}
+\begin{itemize}
+    \item 面向医疗多模态问答场景,设计覆盖多维度理解、逻辑推理、医学正确性、安全性、回答有用性、格式规范等维度的自动评测框架,辅助大模型迭代过程中的回归与对比。
+    \item 基于 LLM-as-a-Judge 设计并优化评测 prompt、rubric 细化与子分标签;调用 Claude 等模型对回答进行结构化打分,完成结果输出、维度分析、bad case 回溯与评测报告可视化。
+    \item 针对医学场景常见错误类型(笼统/空泛回答、幻觉、证据缺失、图像利用不足、结构输出不规范等)构建错误分类视角,为模型迭代与后续 benchmark 设计提供依据。
+\end{itemize}
+
+\textbf{医疗 KIE Benchmark 构建}
+\begin{itemize}
+    \item 参与医疗信息抽取场景下 benchmark 任务设计,覆盖分类、字段值抽取、关系判断与复杂结构输出等多种任务类型。
+\end{itemize}
+
+% ====================== 个人总结 ======================
+\section{个人总结}
+
+\textbf{充足的实习时间:}可实习6个月以上\\[4pt]
+\textbf{技术技能}
+\begin{itemize}
+    \item 大模型训练与推理框架:Swift, VERL, vLLM, Megatron-LM, Transformers
+    \item 大模型评测与分析:LLM-as-a-Judge, Reward Data Construction, Rubric Design, Bad Case Analysis, Post-training Evaluation
+    \item 医疗 AI 相关:Medical QA, Medical KIE, Multimodal Evaluation, Structured Extraction
+    \item 编程与实验:Python, PyTorch, Shell, Linux, GPU Server Debugging
+    \item \textbf{实验环境:}H200 / 多 GPU 环境配置、训练日志分析、依赖与版本兼容调试
+\end{itemize}
+
+\end{document}

@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# Qwen3.5 architecture notes:
+#   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does
+#   NOT support packed sequences (THD format) in Megatron-LM. Therefore:
+#     - model.use_remove_padding=False           (deprecated option, will be removed in the future forces bshd compute format)
+#     - actor.megatron.use_remove_padding=False  (forces bshd compute format)
+#     - actor.use_dynamic_bsz=False              (required for bshd mode)
+#
+#   Once Megatron-LM adds THD support for Qwen3.5 GDN, use_remove_padding
+#   can be set to True for better performance.
 source /home3/medcog/jycai6/.bashrc
 conda activate verl_rl
 
@@ -194,10 +203,10 @@ mkdir -p "$(dirname "${LOG_FILE}")" "$(dirname "${CKPTS_DIR}")"
 DATA=(
     data.train_files=${train_path}
     data.val_files=${test_path}
-    data.train_batch_size=64
+    data.train_batch_size=512
     # blzk有几百条大于4096
-    data.max_prompt_length=2048
-    data.max_response_length=1024
+    data.max_prompt_length=8192
+    data.max_response_length=16384
     data.truncation='error'
     data.filter_overlong_prompts=True
     data.filter_overlong_prompts_workers=32
@@ -219,11 +228,12 @@ MODEL=(
 
 ACTOR=(
     actor_rollout_ref.actor.optim.lr=1e-6
-    actor_rollout_ref.actor.ppo_mini_batch_size=32
+    actor_rollout_ref.actor.ppo_mini_batch_size=1024
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
+    # max_token_len must be set when use_dynamic_bsz is True
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096
     actor_rollout_ref.actor.use_dynamic_bsz=False
-    actor_rollout_ref.actor.use_kl_loss=True
+    actor_rollout_ref.actor.use_kl_loss=False
     actor_rollout_ref.actor.kl_loss_coef=0.01
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
     actor_rollout_ref.actor.entropy_coeff=0
@@ -256,13 +266,13 @@ ROLLOUT=(
     actor_rollout_ref.rollout.name=${rollout_name}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP}
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5
-    actor_rollout_ref.rollout.n=3
+    actor_rollout_ref.rollout.n=8
     actor_rollout_ref.rollout.mode=async
     actor_rollout_ref.rollout.dtype=bfloat16
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096
-    actor_rollout_ref.rollout.max_model_len=8192
+    # actor_rollout_ref.rollout.max_model_len=8192
     # === 添加训练时的采样参数 ===
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=1.0
@@ -354,9 +364,9 @@ TRAINER=(
     trainer.default_local_dir=${CKPTS_DIR}
     trainer.n_gpus_per_node=8
     trainer.nnodes=${NNODES}
-    trainer.save_freq=300
-    trainer.val_before_train=False
-    trainer.test_freq=200
+    trainer.save_freq=50
+    trainer.val_before_train=True
+    trainer.test_freq=10
     trainer.total_epochs=1
 
     # Number of generations to log during validation

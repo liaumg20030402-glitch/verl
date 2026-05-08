@@ -44,7 +44,10 @@ TASK_CONFIGS = [
 ]
 
 
-# -------------------- 通用解析 --------------------
+
+UNIFIED_SYSTEM_PROMPT = "你能够回答用户的各种问题，回答问题能够多角度全面、表述专业、重点突出。"
+
+
 def _clean_spark_text(text: str) -> str:
     """清洗 Spark 导出的转义字符，便于后续切分。"""
     s = str(text or "")
@@ -56,17 +59,18 @@ def _clean_spark_text(text: str) -> str:
 
 
 def parse_spark_input(raw_input: str) -> tuple[str, str]:
-    """解析 <System>...<end><User>...<end><Bot> 格式输入。"""
-    s = _clean_spark_text(raw_input)
+    """解析 <System>...<end><User>...<end><Bot> 格式输入。
 
-    system_m = re.search(r"<System>(.*?)<end>", s, re.DOTALL | re.IGNORECASE)
-    system_content = system_m.group(1).strip() if system_m else ""
-    # 将历史思考标记替换为统一标签，保持和现有训练格式一致
-    system_content = system_content.replace("<unused6>", "<think>").replace("<unused7>", "</think>")
+    返回 (system_content, user_content)。其中 system_content 固定使用
+    UNIFIED_SYSTEM_PROMPT，丢弃原始 <System> 段（含 <unused6>/<unused7>
+    思考标记），原因：Qwen3.5-MoE 自带 thinking，不需要外部 system 提示
+    再去声明 <think></think> 这种格式。
+    """
+    s = _clean_spark_text(raw_input)
 
     user_m = re.search(r"<User>(.*?)<end>", s, re.DOTALL | re.IGNORECASE)
     user_content = user_m.group(1).strip() if user_m else ""
-    return system_content, user_content
+    return UNIFIED_SYSTEM_PROMPT, user_content
 
 
 def _read_df(input_path: str) -> pd.DataFrame:

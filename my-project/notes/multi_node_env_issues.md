@@ -160,6 +160,47 @@ fi
 
 ---
 
+### 问题 8：官方文档 `docs/start/multinode.rst` 里的 `ray job submit` 是什么？和我脚本里的 `ray.init()` 有什么区别？
+
+**`ray job submit` 是什么**
+
+它是一条**面向"已经在运行"的 Ray 集群的作业提交 CLI**，通过 Ray dashboard 的 HTTP API（默认端口 `:8265`）把一段 Python 脚本当成 job 丢进集群跑。**它不负责起集群**。
+
+```bash
+# 前提：集群已经通过 ray start --head / ray start --address 在两台机上起好
+ray job submit --address="http://127.0.0.1:8265" \
+    --runtime-env=verl/trainer/runtime_env.yaml \
+    --no-wait \
+    -- \
+    python3 -m verl.trainer.main_ppo trainer.nnodes=2 ...
+```
+
+提交后 dashboard 会拉起一个子进程当 driver，可以用 `ray job list / logs / status / stop` 监控。
+
+**与你脚本的对比**
+
+| 维度 | `ray job submit` | 你的脚本 |
+|---|---|---|
+| 谁来起集群 | 不负责，需先 `ray start` | 脚本内部 `ray start --head` / `ray start --address` |
+| Driver 在哪跑 | dashboard 在 head 上拉起 driver 子进程 | head 节点直接 `python3 -m verl.trainer.main_ppo` |
+| `ray.init()` 在哪 | dashboard 启动 driver 时由 `main_ppo.py` 自己调用 | `main_ppo.py` 调用，连接 `address=auto` 找已有集群 |
+| 集群生命周期 | 长期存活，可跑 N 个 job | 一次性：训练退出 `trap` 触发 `ray stop` 拆掉集群 |
+| 日志 | `ray job logs <id>` 集中收 | 自己 `tee` 到文件 |
+| 适合谁 | 常驻 Ray 集群、多人/多任务共用、交互提交 | 调度器（ky/slurm）一次性任务 |
+
+**关键点：两者不是二选一**。`ray job submit` 仍然需要先用 `ray start` 把集群组好。它只是把"提交训练 driver"这一步从「直接 `python3 -m ...`」换成了「让 dashboard 帮你拉起来」。
+
+**为什么 ky 场景下不用 `ray job submit`**
+
+ky 本身就是 job 调度器，已经管了"任务排队、资源分配、节点拉起、超时清理"等责任。再套一层 `ray job submit` 等于双重 job 管理 —— 既要 ky 等到 head 节点起来 dashboard 才 listen，又要在 head 上额外保留一个常驻 dashboard 进程，没收益还增加复杂度。所以你脚本里**直接 `python3 -m verl.trainer.main_ppo` + `ray.init(address=auto)`**是最简洁的写法，把 ky 当外层调度，Ray 当内层并行框架，职责清晰。
+
+**面试要点**：
+- `ray start` = 起集群（control-plane）；`ray.init()` = driver 接入集群；`ray job submit` = 通过 dashboard 提交 driver。三者职责不同
+- 选哪种取决于**集群是常驻还是一次性**：常驻 → submit + dashboard；一次性 → 脚本里 start + 直接 python
+- 区分"集群生命周期"和"训练 job 生命周期"，是面试官想听的概念
+
+---
+
 ## 串起来的一条总线
 
 所有问题本质上围绕**三类失配**：
