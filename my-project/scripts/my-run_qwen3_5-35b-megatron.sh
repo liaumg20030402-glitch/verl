@@ -194,16 +194,17 @@ train_path=${train_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/b
 test_path=${test_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_val_fast_verl.parquet"}
 
 BASE_OUT_DIR="/train21/medcog/permanent/jycai6/jmli27/"
-LOG_FILE="${BASE_OUT_DIR}/log/${project_name}/grpo_verl_megatron_qwen35_a3b_${UNIQUE_ID}_multi.log"
 CKPTS_DIR="${BASE_OUT_DIR}/output/${project_name}/${UNIQUE_ID}_multi"
-mkdir -p "$(dirname "${LOG_FILE}")" "$(dirname "${CKPTS_DIR}")"
+LOG_FILE="${CKPTS_DIR}/grpo_verl_megatron_qwen35_a3b_${UNIQUE_ID}_multi.log"
+export TENSORBOARD_DIR="${CKPTS_DIR}/tensorboard"
+mkdir -p "${CKPTS_DIR}"
 
 ############################# Parameter Arrays #############################
 
 DATA=(
     data.train_files=${train_path}
     data.val_files=${test_path}
-    data.train_batch_size=512
+    data.train_batch_size=576
     # blzk有几百条大于4096
     data.max_prompt_length=8192
     data.max_response_length=16384
@@ -228,7 +229,8 @@ MODEL=(
 
 ACTOR=(
     actor_rollout_ref.actor.optim.lr=1e-6
-    actor_rollout_ref.actor.ppo_mini_batch_size=1024
+    # verl 里 train_batch_size 和 ppo_mini_batch_size 的单位都是 prompt 数
+    actor_rollout_ref.actor.ppo_mini_batch_size=144
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
     # max_token_len must be set when use_dynamic_bsz is True
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096

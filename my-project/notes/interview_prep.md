@@ -113,6 +113,11 @@
 
 ---
 
+任务特征适合的reward答案确定、可程序化验证（数学、代码、选择题）：规则式
+答案确定但表述多样（开放问答、有GT的简答题）：生成式RM with GT 或 规则+pointwise 
+RM答案不确定但有人类偏好规律（对话、写作、安全）：判别式RM
+答案不确定且偏好难标注：生成式RM (LLM-as-judge) with rubric
+
 **Q5：GenRM 的 reward hacking 怎么防？**
 > - 模型可能学会"输出能让 GenRM 满意但实际错"的答案。例如冗长重复、看似严谨实则空洞。
 > - 防护手段：
@@ -156,6 +161,51 @@
 > - 这是 PPO/GRPO 老问题。vLLM 用 fused MoE kernel + bf16，Megatron 用 grouped GEMM + 可能 fp32 router，**同一段 token 算出来的 logprob 不完全一样**。
 > - verl 的解法（看 [verl/workers/megatron_workers.py:907](../../verl/workers/megatron_workers.py#L907)）：**HybridEngine 里强制重算 old_log_probs**——rollout 完后 Megatron 再 forward 一遍 (prompt, response)，用这个重算的 logprob 当 π_old，与 training 时的 π_new 都是同引擎，ratio 第 0 步严格 = 1。
 > - 详细推导见 [reward解答.md](./reward解答.md)。
+
+**Q10.5：你脚本里 `top_p=1.0, top_k=-1, temperature=1.0` 是什么意思？这几个参数怎么协同？**
+
+这是面试官查 RLHF 基本功的高频题。
+
+**先解释三个参数本身**：
+1. **`temperature` (T)**：缩放 logits（除以 T 再 softmax）。T=1 不变；T<1 让分布更尖（确定性高）；T>1 让分布更平（探索性高）。
+2. **`top_k=K`**：只保留概率最高的 K 个 token，其他归零再重新归一化。K=-1 表示**关闭**（不过滤）。
+3. **`top_p=P`** (nucleus sampling)：按概率从高到低累加，找到累计概率 ≥ P 的最小 token 集合，集合外的归零再重新归一化。P=1.0 表示**关闭**（保留全部）。
+
+**它们是流水线串联，不是并行**：
+```
+原始 logits
+  ↓ ÷ temperature   （缩放）
+  ↓ top_k 过滤      （留 top K）
+  ↓ top_p 过滤      （留累计 P 内）
+  ↓ softmax 归一
+  ↓ multinomial 采样
+最终 token
+```
+
+**为什么 RL 训练阶段三个都"关掉"（T=1, K=-1, P=1）？**
+
+> 1. **保证 on-policy 性**：PPO/GRPO 的 ratio = `π_new / π_old` 假设 π_old 就是模型自己的原始分布。一旦 rollout 用了 `top_p=0.9` 这种过滤，rollout 的实际分布是**截断重归一化的分布**，和训练时 forward 的 raw 分布不一致 → ratio 数学上就错了，PPO clip 失效。
+> 2. **最大化探索**：GRPO 需要组内 reward 有方差才能产生 advantage 信号；过滤会砍掉低概率 token → 同组 N 条 response 趋同 → group_std 趋近 0 → dapo 大量过滤这种 group → 有效训练信号锐减。
+> 3. **避免 entropy collapse 加速**：top_p/top_k 本身就在压低 entropy，叠加 RL 后期模型主动收紧策略 → entropy 塌得更快。
+
+**那什么时候打开这些参数？**
+- **验证/推理阶段**（你脚本里的 `val_kwargs`）：要稳定输出，用 `do_sample=False, temperature=0` 走 greedy；如果想多样化采样，可以 `top_p=0.9, top_k=50, T=0.7`。
+- **业务上线**：top_p=0.9, T=0.7 是经典的"既多样又不胡言"配置。
+
+**面试加分**：如果对方追问"那 GRPO 怎么保证 rollout 的多样性？"——答：**靠 `rollout.n=8` 重复采样原始分布 N 次**，而不是靠 top_p<1 截断。前者是无偏采样，后者是有偏的。
+
+**你的实际配置**：
+```bash
+# 训练 rollout：纯采样、最大探索
+actor_rollout_ref.rollout.temperature=1.0
+actor_rollout_ref.rollout.top_p=1.0
+actor_rollout_ref.rollout.top_k=-1
+
+# 验证 rollout：贪心、稳定
+actor_rollout_ref.rollout.val_kwargs.do_sample=False
+actor_rollout_ref.rollout.val_kwargs.temperature=0
+```
+do_sample=False 时 top_p/top_k 不起作用（直接 argmax），所以 val 那几行的 top_p=1.0 / top_k=-1 是冗余的"正确默认值"。
 
 ### D. 多模态相关（你简历提到了多模态评测）
 
@@ -211,6 +261,135 @@
 > - 每个分数对应明确的 anchor 描述（"3 分 = 完全正确且充分；2 分 = 大方向对但有小错；1 分 = 部分正确；0 分 = 错误或不答"）。
 > - 用 200+ 条人工标注做 inter-rater agreement，Cohen's kappa 应该 > 0.6。
 
+### H. KV Cache 与推理优化（高频面试题，必背）
+
+**Q-K1：什么是 KV Cache？为什么需要它？**
+
+LLM 自回归解码时，每生成一个 token 都要做一次完整 forward。**没有 KV cache 的话**，第 t 步要重算前面所有 t-1 个 token 的 K、V，**总计算量是 O(n²)** —— 解 1000 个 token 要做 50w 次 attention 计算。
+
+**KV cache 的核心 idea**：transformer 里 K、V 是过去 token 的**只读副产物**，不会因后续 token 而改变。所以每生成一个新 token 时：
+- **缓存**这个 token 在每一层 attention 算出来的 K, V
+- **后续 token** forward 时，新 token 的 Q **直接和 cache 里所有历史 K, V 做 attention**
+- 复杂度从 O(n²) 降到 **O(n)**（每步只算 1 个 token 的 KV，attention 还是 O(n) 但只 build 一次 Q）
+
+可以理解成"用显存换计算"——多占显存存 KV，省下大量重复矩阵乘。
+
+**Q-K2：KV Cache 显存占用怎么算？为什么是大模型推理的瓶颈？**
+
+公式（每层每个 token，per sample）：
+```
+KV cache 字节数 = 2 × num_layers × num_kv_heads × head_dim × seq_len × batch_size × dtype_bytes
+                  ↑ K 和 V 各一份
+```
+
+**Llama-2-70B 举例**（80 层、num_kv_heads=8 (GQA)、head_dim=128、bf16=2字节）：
+```
+单 token 单 sample：2 × 80 × 8 × 128 × 2 = 320 KB
+4096 token 单 sample：320 KB × 4096 ≈ 1.3 GB
+batch=32 / 4096 token：1.3 GB × 32 = 41 GB   ← 就这一项！
+```
+
+**Qwen3.5-35B-A3B 你跑的场景**：
+- prompt 8192 + response 16384 = 24576 token
+- batch=8 (rollout.n=8 同 prompt)
+- 单 prompt 一组的 KV cache 就占几十 GB
+
+**为什么是瓶颈**：
+- **decode 阶段是 memory-bound**（每步只算 1 个 token，但要从 HBM 读全部历史 KV），算力空着，带宽满载
+- 长序列下 KV cache 远大于模型权重本身，决定了**最大 batch size 和最大 seq len**
+- vLLM 的 `gpu_memory_utilization=0.6` 就是为 KV cache **预留** 60% 显存
+
+**Q-K3：vLLM 的 PagedAttention 解决了什么问题？**
+
+**问题**：传统 KV cache 给每个 sequence **预分配最大长度的连续显存** → 显存碎片严重 + 浪费严重。
+- 比如 max_model_len=16384，但很多 response 只有 500 token → 浪费 96%
+- 多个 sequence 同时跑，每个都按最大长度预留 → 显存爆炸
+
+**PagedAttention 的解法**（借鉴 OS 虚拟内存分页）：
+1. 把 KV cache 切成固定大小的 **block**（比如 16 token 一块）
+2. 每个 sequence 只在**真正需要时**申请新 block，不预留
+3. 物理 block 在 HBM 里**不连续**也没关系，用 block table 维护逻辑→物理映射
+4. attention kernel 改造成支持非连续 KV 访存
+
+**收益**：
+- 显存利用率从 ~30% 提升到 90%+
+- batch size 可以做大 4-10 倍 → 吞吐翻倍
+- 多 sequence 共享 prompt 时可以**复用 block**（prefix caching）
+
+vLLM 的核心创新就是这个，论文 [Efficient Memory Management for Large Language Model Serving with PagedAttention](https://arxiv.org/abs/2309.06180)（SOSP'23）。
+
+**Q-K4：MQA / GQA 是什么？怎么帮 KV cache 减负？**
+
+经典 Multi-Head Attention（MHA）：每个 head 有独立的 K、V → KV cache 大小 ∝ num_heads。
+
+**MQA (Multi-Query Attention)**：所有 head **共享同一组 K, V**，只有 Q 是 per-head 的。
+- KV cache 缩小 num_heads 倍（比如 32 头 → 1 倍 K,V）
+- 缺点：模型表达能力下降明显
+
+**GQA (Group-Query Attention)**：折中。把 head 分组，每组共享 K, V。
+- 比如 32 head 分成 8 组（每组 4 个 head）→ KV cache 缩小 4 倍
+- Llama 2/3、Qwen 系列、Mistral 都用 GQA
+- 论文 [GQA: Training Generalized Multi-Query Transformer Models](https://arxiv.org/abs/2305.13245)
+
+**直觉**：Q 决定"我要查什么"，per-head 多样性重要；K, V 是"知识库"，head 之间共享损失不大。
+
+**Qwen3.5-35B-A3B 看 config**：`num_attention_heads=32, num_key_value_heads=4` → GQA 8:1 共享。
+
+**Q-K5：Prefill 和 Decode 阶段的 KV Cache 行为为什么不一样？**
+
+LLM 推理分两个阶段，性能特征**完全相反**：
+
+| | **Prefill**（处理 prompt） | **Decode**（生成 response） |
+|---|---|---|
+| 输入 | 整个 prompt（几百~几千 token）一次性进 | 每步只进 1 个新 token |
+| 计算量 | O(prompt_len²) | O(n) per step |
+| 性质 | **compute-bound**（GPU 算力打满）| **memory-bound**（HBM 带宽打满，算力闲置）|
+| KV cache | 一次性写入整段 prompt 的 KV | 每步追加 1 token 的 KV |
+| 优化方向 | flash attention、tensor parallelism | KV cache 量化、连续 batching、speculative decoding |
+| 时间占比 | 短（毫秒级）| 长（秒级）|
+
+**为什么 decode 是 memory-bound**：每步要从 HBM 读全部历史 KV cache（GB 级别），但只算 1 个 token 的 attention（小 GEMM），算力闲置。这就是为什么**大模型推理优化主战场在 decode**。
+
+**Chunked prefill**（vLLM 0.5+ 默认）：把超长 prompt 的 prefill 切成小块，和其他 sequence 的 decode **混合 batch**，让算力和带宽都打满 —— 进一步提吞吐。
+
+**Q-K6：KV cache 量化和压缩有哪些做法？**
+
+KV cache 太大时的常见手段：
+
+1. **KV cache 量化（INT8 / INT4）**
+   - 把 K, V 从 bf16 量化到 int8（显存减半）或 int4（4 倍压缩）
+   - vLLM 的 `kv_cache_dtype=fp8` / `fp8_e5m2` 就是干这个
+   - 主要风险：长上下文累积误差，需要校准
+   
+2. **MLA (Multi-head Latent Attention)** —— DeepSeek-V2/V3 的招牌
+   - 把 K, V 投影到低维 latent space 再缓存，**KV cache 缩小 ~10 倍**
+   - 需要专用 attention kernel，但效果非常好（DeepSeek-V3 671B 推理友好的关键）
+   
+3. **Sliding Window Attention** —— Mistral
+   - 只保留最近 W 个 token 的 KV，老的丢弃
+   - 上下文受限但 KV cache 上限固定
+   
+4. **Sparse / Selective KV cache**
+   - 比如 H2O、StreamingLLM：只保留"重要"的 token KV（attention 权重高的）
+   - 适合超长上下文（100k+）
+   
+5. **Prefix Caching** —— vLLM
+   - 不同 sequence 共享相同 prompt 前缀的 KV cache
+   - 你的 GRPO 场景特别有用：**同一个 prompt 采 8 条 response，prefix 只算一次**
+   - vLLM 的 `enable_prefix_caching=True` 开关
+
+**Q-K7：你 RL 训练里 KV cache 是怎么影响配置的？**
+
+这题面试官最爱问"理论怎么落到你的项目"。
+
+> - **`gpu_memory_utilization=0.6`**：vLLM 拿走 60% 显存，**绝大部分给 KV cache**（模型权重在 vLLM 启动时就 load 好了，剩下都给 KV）。
+> - **`max_model_len=8192` 之类的设置**：直接决定单 sequence 的 KV cache 上限。设小了浪费长样本，设大了显存被预留过头反而 batch 跑不大。
+> - **`rollout.n=8`**：同 prompt 8 条 response，开 prefix caching 时 prompt 部分 KV 只算一次 → rollout 加速 ~1.5-2 倍。
+> - **MoE 模型 KV cache 行为**：MoE 的 K, V 还是 dense 的（routing 在 FFN 那层做），所以 KV cache 公式不变。Qwen3.5-35B-A3B（35B 总参 / 3B 激活）的 KV cache 占用按 35B 算，不是 3B。
+> - **Async rollout**：训练步和 rollout 步重叠时，KV cache 显存压力分散到不同时间窗口，能跑更大有效 batch。
+
+---
+
 ### G. 算法理论（兜底问题）
 
 **Q18：GRPO 相比 PPO 的核心区别？**
@@ -252,6 +431,9 @@
 - **"GDN 是线性注意力 + 状态机递推，所以 Megatron varlen 比 softmax attention 难做"** —— 架构理解
 - **"DAPO 四件套：clip-higher、dynamic sampling、token-level loss、overlong shaping"** —— 跟前沿
 - **"LLM-as-Judge 必须用人工标注做 inter-rater agreement 校准，kappa > 0.6 才能用"** —— 评测方法论
+- **"RL rollout 必须 top_p=1, top_k=-1, T=1，否则 ratio 数学上就错了"** —— 采样常识
+- **"decode 阶段是 memory-bound，KV cache 决定 batch 上限；PagedAttention 把碎片从 70% 压到 10%"** —— 推理工程
+- **"GQA 让 K,V 在 head 间分组共享，KV cache 直接缩 4-8 倍"** —— 架构理解
 
 ---
 

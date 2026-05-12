@@ -24,11 +24,20 @@ def _normalize_target(text: str) -> str:
 
 
 def _sanitize_answer(text: str) -> str:
-    """清洗模型输出：移除 <think>...</think> 思考块及 Markdown 代码围栏。
+    """清洗模型输出：移除思考块及 Markdown 代码围栏。
+
+    思考块处理逻辑：
+      若文本中出现 ``</think>``，只保留最后一个 ``</think>`` 之后的内容。这能同时覆盖：
+        1) 标准 `<think>...</think>实际答案` 形式；
+        2) Qwen3.5 / Qwen3 原生 thinking 模式：chat template 在 prompt 末尾就追加了
+           `<think>`，模型实际只输出 `thinking...</think>实际答案`，**没有 `<think>` 开始
+           标签**。旧实现用 `<think>.*?</think>` 这类成对正则匹配会漏掉这种情况，
+           导致 thinking 内容被当成 JSON 候选，触发 ``json_not_found``。
+        3) 没有 `</think>` 的非 thinking 输出，整段保留。
     """
     s = str(text or "")
-    # 移除思考块，只保留 </think> 之后的最终回答部分
-    s = re.sub(r"<think>.*?</think>", "", s, flags=re.DOTALL)
+    if "</think>" in s:
+        s = s.rsplit("</think>", 1)[-1]
     # 若存在 markdown 代码块，优先提取其内部内容；否则仅去掉围栏标记
     fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", s, re.IGNORECASE)
     if fence_match:
@@ -39,58 +48,17 @@ def _sanitize_answer(text: str) -> str:
     return s.strip()
 
 
-def _extract_first_json_object(text: str) -> str:
-    """按花括号深度提取首个顶层 JSON 对象，忽略字符串内部花括号。"""
-    s = str(text or "").strip()
-    if not s:
-        return ""
-    start = s.find("{")
-    if start < 0:
-        return ""
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(start, len(s)):
-        ch = s[i]
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return s[start : i + 1]
-    return ""
-
-
 def judge_blzk_answer(answer: str, target: str) -> tuple[float, dict]:
-    """
-    病历质控规则打分：
-    1. 清洗模型输出并提取 JSON 对象
-    2. 键集合必须与预定义 _KEY_MODES 之一完全一致
-    3. 对应结论字段须为"合格"或"不合格"
-    4. 预测结论与目标一致得 1.0，否则 0.0
-    """
     clean_answer = _sanitize_answer(answer)
     target_norm = _normalize_target(target)
     if target_norm not in {"合格", "不合格"}:
         return 0.0, {"reason": "invalid_target"}
 
-    json_text = _extract_first_json_object(clean_answer)
-    if not json_text:
+    if not clean_answer:
         return 0.0, {"reason": "json_not_found"}
 
     try:
-        obj = json.loads(json_text)
+        obj = json.loads(clean_answer)
     except Exception:
         return 0.0, {"reason": "json_parse_failed"}
 
