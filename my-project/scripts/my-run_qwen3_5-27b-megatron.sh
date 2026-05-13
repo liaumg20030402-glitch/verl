@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# Qwen3.5 architecture notes:
+# Qwen3.5-27B (Dense) GRPO RL with Megatron
+#
+# Qwen3.5 architecture notes（和 35B-A3B 共用）:
 #   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does
 #   NOT support packed sequences (THD format) in Megatron-LM. Therefore:
-#     - model.use_remove_padding=False           (deprecated option, will be removed in the future forces bshd compute format)
+#     - model.use_remove_padding=False           (forces bshd compute format)
 #     - actor.megatron.use_remove_padding=False  (forces bshd compute format)
 #     - actor.use_dynamic_bsz=False              (required for bshd mode)
 #
-#   Once Megatron-LM adds THD support for Qwen3.5 GDN, use_remove_padding
-#   can be set to True for better performance.
+# Dense vs 35B-A3B 差异:
+#   - Qwen3.5-27B 是 dense 模型，**没有 expert**，所以不需要 EP / ETP
+#   - dense 单 token 激活显存比 MoE-A3B 大（用所有参数 vs 只用激活参数），TP 通常调大一些
+#   - 默认 TP=4（35B-A3B 是 TP=2）
+#   - 配置数组里去掉所有 MoE 相关 override（aux_loss / z_loss / vanilla_mbridge）
+
 source /home3/medcog/jycai6/.bashrc
 conda activate verl_rl
 
@@ -21,9 +27,7 @@ set -xeuo pipefail
 # ===== Reward mode 配置 =====
 # REWARD_MODE: rule | disrm | genrm
 REWARD_MODE=${REWARD_MODE:-rule}
-# reward manager 
 REWARD_MANAGER_NAME=${REWARD_MANAGER_NAME:-dapo}
-
 
 # 自定义奖励函数路径（rule/genrm 模式会用到）
 REWARD_FN_PATH=${REWARD_FN_PATH:-"/train21/medcog/permanent/jycai6/jmli27/reward/reward_fn_blzk_rule.py"}
@@ -44,9 +48,9 @@ export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}
 
 # # 加大vllm内部超时
 # export VLLM_ENGINE_ITERATION_TIMEOUT_S=600
-# export VLLM_RPC_TIMEOUT=600000 
-# 编译缓存：全部放到节点本地 /tmp，避免多机共享 NFS 上 16 个 worker 并发 JIT
-# 编译时的 flock/半写文件竞争（flashinfer gdn_prefill_sm90 在 NFS 上极易 ninja 失败）。
+# export VLLM_RPC_TIMEOUT=600000
+
+# 编译缓存：全部放到节点本地 /tmp，避免多机共享 NFS 上 worker 并发 JIT 编译竞争
 UNIQUE_ID=${UNIQUE_ID:-$(date +%Y%m%d_%H%M%S)}
 tmp_run_dir="/tmp/jmli27_verl_run_${UNIQUE_ID}"
 export TRITON_CACHE_DIR="${tmp_run_dir}/triton_cache"
@@ -58,7 +62,7 @@ export XDG_CACHE_HOME="${tmp_run_dir}/xdg_cache"
 mkdir -p "${TRITON_CACHE_DIR}" "${TORCHINDUCTOR_CACHE_DIR}" "${VLLM_CONFIG_ROOT}" \
          "${FLASHINFER_WORKSPACE_BASE}" "${FLASHINFER_JIT_DIR}" "${XDG_CACHE_HOME}"
 
-# 让 head清理本节点 NFS HOME 下可能残留的旧 cache
+# 让 head 清理本节点 NFS HOME 下可能残留的旧 cache
 if [ "${RANK:-0}" == "0" ]; then
     rm -rf ~/.cache/vllm ~/.cache/torch/inductor ~/.triton/cache ~/.cache/flashinfer 2>/dev/null || true
 fi
@@ -146,7 +150,6 @@ PYEOF
         done
         echo "[Ray] 集群就绪，开始训练。"
         ray status || true
-        # 训练退出（不论成功失败）时，都 ray stop，避免 daemon 残留。
         trap 'echo "[Ray] 停止集群..."; ray stop --force' EXIT
     else
         # Worker：用重试循环 join
@@ -175,22 +178,23 @@ PYEOF
 fi
 
 ############################# Quick Config #############################
-TP=${TP:-2}
+# Qwen3.5-27B 是 dense 模型，无 EP/ETP
+# 27B dense 单 token 激活显存比 35B-A3B 大（用全部参数 vs 只用激活参数），
+# 所以 TP 默认设大一点（TP=4），PP/CP 保持 1。
+TP=${TP:-4}
 PP=${PP:-1}
 CP=${CP:-1}
-EP=${EP:-8}
-ETP=${ETP:-1}
-GEN_TP=${GEN_TP:-8}
+GEN_TP=${GEN_TP:-8}    # vLLM rollout TP，独立于训练侧 TP
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 
 rollout_name="vllm"
-project_name='verl_grpo_qwen3_5_35b_blzk'
-exp_name="verl_qwen3_5_35b_megatron_blzk_rule_${UNIQUE_ID}_multi"
+project_name='verl_grpo_qwen3_5_27b_blzk'
+exp_name="verl_qwen3_5_27b_megatron_blzk_${REWARD_MODE}_${UNIQUE_ID}_multi"
 adv_estimator=grpo
 
 # ===== 本地模型路径 =====
-HF_MODEL_PATH=${HF_MODEL_PATH:-"/train21/medcog/permanent/leijiang19/pretrain_models/Qwen3.5-35B-A3B"}
+HF_MODEL_PATH=${HF_MODEL_PATH:-"/train21/medcog/permanent/leijiang19/pretrain_models/Qwen3.5-27B"}
 
 # ===== 本地 parquet 数据路径 =====
 train_path=${train_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_train_fast_verl.parquet"}
@@ -198,7 +202,7 @@ test_path=${test_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blz
 
 BASE_OUT_DIR="/train21/medcog/permanent/jycai6/jmli27/"
 CKPTS_DIR="${BASE_OUT_DIR}/output/${project_name}/${UNIQUE_ID}_multi"
-LOG_FILE="${CKPTS_DIR}/grpo_verl_megatron_qwen35_a3b_${UNIQUE_ID}_multi.log"
+LOG_FILE="${CKPTS_DIR}/grpo_verl_megatron_qwen35_27b_${UNIQUE_ID}_multi.log"
 # export TENSORBOARD_DIR="${CKPTS_DIR}/tensorboard"
 mkdir -p "${CKPTS_DIR}"
 
@@ -207,6 +211,11 @@ mkdir -p "${CKPTS_DIR}"
 DATA=(
     data.train_files=${train_path}
     data.val_files=${test_path}
+    # ⚠️ batch 整除性提示：
+    # minimal_bsz = (NNODES*8 / TP/PP/CP) * micro_per_gpu
+    # NNODES=2 TP=4 → DP=4, minimal_bsz=4    train_batch 可任意 4 倍数
+    # NNODES=4 TP=4 → DP=8, minimal_bsz=8    train_batch 可任意 8 倍数
+    # NNODES=6 TP=4 → DP=12, minimal_bsz=12  train_batch 需 12 倍数（含质因子 3，注意）
     data.train_batch_size=384
     data.max_prompt_length=8192
     data.max_response_length=16384
@@ -215,9 +224,7 @@ DATA=(
     data.filter_overlong_prompts_workers=32
     data.return_raw_chat=True
     data.shuffle=True
-    # 固定打乱顺序，可复现
     data.seed=42
-    # 限制训练集验证集大小，加快测试速度（可根据实际情况调整，-1为全部）
     data.train_max_samples=-1
     data.val_max_samples=-1
     # +data.apply_chat_template_kwargs='{enable_thinking:False}'
@@ -226,15 +233,17 @@ DATA=(
 MODEL=(
     actor_rollout_ref.model.path=${HF_MODEL_PATH}
     actor_rollout_ref.model.trust_remote_code=True
+    # Qwen3.5 GDN 不支持 THD，必须 False
     actor_rollout_ref.model.use_remove_padding=False
 )
 
 ACTOR=(
     actor_rollout_ref.actor.optim.lr=1e-6
     # verl 里 train_batch_size 和 ppo_mini_batch_size 的单位都是 prompt 数
+    # 必须 train_batch % mini_batch == 0
     actor_rollout_ref.actor.ppo_mini_batch_size=96
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
-    # max_token_len must be set when use_dynamic_bsz is True
+    # use_dynamic_bsz=False 时这行无效（GDN 必须 False）
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096
     actor_rollout_ref.actor.use_dynamic_bsz=False
     actor_rollout_ref.actor.use_kl_loss=False
@@ -243,13 +252,13 @@ ACTOR=(
     actor_rollout_ref.actor.entropy_coeff=0
 
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=True
+    # 27B 是 dense，不需要 vanilla_mbridge（vanilla_mbridge 主要给 MoE 用）
+    # actor_rollout_ref.actor.megatron.vanilla_mbridge=True
     actor_rollout_ref.actor.megatron.use_remove_padding=False
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${PP}
     actor_rollout_ref.actor.megatron.context_parallel_size=${CP}
-    actor_rollout_ref.actor.megatron.expert_model_parallel_size=${EP}
-    actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${ETP}
+    # dense 模型不需要 EP/ETP，从配置里移除
     actor_rollout_ref.actor.megatron.param_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.optimizer_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
@@ -258,8 +267,8 @@ ACTOR=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_aux_loss_coeff=0.01
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_z_loss_coeff=0.001
+    # dense 模型移除 MoE 专属 loss 系数:
+    #   moe_aux_loss_coeff 和 moe_z_loss_coeff 是 MoE router 专用的辅助 loss，dense 没有 router
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1
     +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=True
     +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
@@ -273,11 +282,13 @@ ROLLOUT=(
     actor_rollout_ref.rollout.n=8
     actor_rollout_ref.rollout.mode=async
     actor_rollout_ref.rollout.dtype=bfloat16
+    #   权重同步bucket 传输
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096
     # actor_rollout_ref.rollout.max_model_len=24576
-    # === 添加训练时的采样参数 ===
+    # === 训练时的采样参数 ===
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=1.0
     actor_rollout_ref.rollout.top_k=-1
@@ -288,7 +299,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.val_kwargs.top_p=1.0
     actor_rollout_ref.rollout.val_kwargs.top_k=-1
     actor_rollout_ref.rollout.val_kwargs.temperature=0
-    # False uses greedy sampling
     actor_rollout_ref.rollout.val_kwargs.do_sample=False
 )
 
@@ -299,8 +309,7 @@ REF=(
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${PP}
     actor_rollout_ref.ref.megatron.context_parallel_size=${CP}
-    actor_rollout_ref.ref.megatron.expert_model_parallel_size=${EP}
-    actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${ETP}
+    # dense 模型不需要 EP/ETP
     actor_rollout_ref.ref.megatron.param_offload=${ALL_OFFLOAD}
 )
 
@@ -316,14 +325,12 @@ REWARD=(
 )
 
 if [[ "${REWARD_MODE}" == "rule" ]]; then
-    # 规则函数：不启用 reward model，只走自定义函数
     REWARD+=(
         reward.reward_model.enable=False
         reward.custom_reward_function.path=${REWARD_FN_PATH}
         reward.custom_reward_function.name=${REWARD_FN_NAME}
     )
 elif [[ "${REWARD_MODE}" == "disrm" ]]; then
-    # 判别式 RM：启用 reward model，不设置 custom_reward_function（走内置 compute_score_disrm）
     REWARD+=(
         reward.reward_model.enable=True
         reward.reward_model.enable_resource_pool=False
@@ -337,7 +344,6 @@ elif [[ "${REWARD_MODE}" == "disrm" ]]; then
         reward.reward_model.rollout.skip_tokenizer_init=False
     )
 elif [[ "${REWARD_MODE}" == "genrm" ]]; then
-    # 生成式 RM：启用 reward model + 自定义函数（函数内走 /v1/chat/completions）
     REWARD+=(
         reward.reward_model.enable=True
         reward.reward_model.enable_resource_pool=False
@@ -373,7 +379,6 @@ TRAINER=(
     trainer.test_freq=10
     trainer.total_epochs=1
 
-    # Number of generations to log during validation
     trainer.log_val_generations=10
     +trainer.validation_data_dir=${CKPTS_DIR}/validation_data
     +trainer.rollout_data_dir=${CKPTS_DIR}/rollout_data
