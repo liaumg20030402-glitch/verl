@@ -160,7 +160,24 @@ actor_rollout_ref.actor.ppo_mini_batch_size=256   # 128 → 256, 每 step 更新
 actor_rollout_ref.actor.grad_clip=1.0
 ```
 
-防止 outlier sample 推动巨大梯度更新，把 π 一次性推向极端。
+**原理**：backward 后计算所有参数梯度的全局 L2 范数，若超过阈值就等比例缩小，方向不变、大小被压到阈值以内。
+
+```
+‖g‖ = √(Σ gᵢ²)            ← 所有参数梯度拼成一个向量，算范数
+
+如果 ‖g‖ > grad_clip：
+    g ← g × (grad_clip / ‖g‖)    ← 方向不变，只缩小幅度
+```
+
+**为什么能防 entropy collapse**：  
+RL 训练中偶尔会遇到 outlier sample（reward 极端高/低），产生巨大梯度，一次 optimizer.step 就把 policy 推向极端，entropy 急剧下降。grad_clip 把单步更新幅度上界封死：
+
+```
+正常 step: ‖g‖ ≈ 0.3  →  正常更新，π 小幅变化
+outlier:   ‖g‖ = 18.0 →  clip → ‖g‖ = 1.0 →  π 受控变化 ✓
+```
+
+**verl 默认值已经是 1.0**（在 `dp_actor.yaml` 里），不设也生效，显式写出是为了可见性。值越小越保守，一般不需要改动。
 
 ---
 
@@ -222,7 +239,7 @@ actor_rollout_ref.rollout.repetition_penalty=1.0
 
 **关键认知**：sampling filter（top_p<1 / top_k>0）会让 rollout 实际分布**比 raw policy 更尖**，等于训练前就先 collapse 了一截。**RL 训练绝对禁止 sampling filter**。
 
-参考 [参数.md 采样流水线章节](./参数.md#rollout-采样参数完整流水线repetition_penalty--temperature--top_k--top_p)。
+
 
 ---
 
@@ -373,7 +390,7 @@ L = L_policy(clip-higher)
 
 ---
 
-## 六、面试金句
+## 六、总结
 
 ### 公式视角版
 
