@@ -34,13 +34,13 @@ REWARD_FN_PATH=${REWARD_FN_PATH:-"/train21/medcog/permanent/jycai6/jmli27/reward
 REWARD_FN_NAME=${REWARD_FN_NAME:-compute_score_blzk_rule}
 
 # 奖励模型路径：genrm/disrm 模式会启用 reward_model
-GRM_MODEL_PATH=${GRM_MODEL_PATH:-"/train21/medcog/permanent/leijiang19/pretrain_models/Qwen2.5-7B-Instruct"}
+GRM_MODEL_PATH=${GRM_MODEL_PATH:-"/train21/medcog/permanent/leijiang19/pretrain_models/Qwen3.5-9B"}
 DISRM_MODEL_PATH=${DISRM_MODEL_PATH:-"${GRM_MODEL_PATH}"}
 export GRM_MODEL_NAME="${GRM_MODEL_NAME:-${GRM_MODEL_PATH}}"
 
 # reward model rollout 资源
 GEN_RM_TP=${GEN_RM_TP:-1}
-GRM_GPU_MEM=${GRM_GPU_MEM:-0.35}
+GRM_GPU_MEM=${GRM_GPU_MEM:-0.4}
 
 export CUDA_HOME=/usr/local/cuda-12.9
 export PATH=${CUDA_HOME}/bin:${PATH}
@@ -190,7 +190,7 @@ ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 
 rollout_name="vllm"
 project_name='verl_grpo_qwen3_5_27b_blzk'
-exp_name="verl_qwen3_5_27b_megatron_blzk_${REWARD_MODE}_${UNIQUE_ID}_multi"
+exp_name="verl_qwen3_5_27b_megatron_blzk_${REWARD_MODE}_${UNIQUE_ID}"
 adv_estimator=grpo
 
 # ===== 本地模型路径 =====
@@ -201,10 +201,10 @@ train_path=${train_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/b
 test_path=${test_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_val_fast_verl.parquet"}
 
 BASE_OUT_DIR="/train21/medcog/permanent/jycai6/jmli27/"
-CKPTS_DIR="${BASE_OUT_DIR}/output/${project_name}/${UNIQUE_ID}_multi"
+CKPTS_DIR="${BASE_OUT_DIR}/output/${project_name}/${exp_name}/${UNIQUE_ID}_multi"
 LOG_FILE="${CKPTS_DIR}/grpo_verl_megatron_qwen35_27b_${UNIQUE_ID}_multi.log"
-# export TENSORBOARD_DIR="${CKPTS_DIR}/tensorboard"
-mkdir -p "${CKPTS_DIR}"
+export TENSORBOARD_DIR="${CKPTS_DIR}/tensorboard"
+mkdir -p "${CKPTS_DIR}" "${TENSORBOARD_DIR}"
 
 ############################# Parameter Arrays #############################
 
@@ -213,10 +213,10 @@ DATA=(
     data.val_files=${test_path}
     # ⚠️ batch 整除性提示：
     # minimal_bsz = (NNODES*8 / TP/PP/CP) * micro_per_gpu
-    # NNODES=2 TP=4 → DP=4, minimal_bsz=4    train_batch 可任意 4 倍数
-    # NNODES=4 TP=4 → DP=8, minimal_bsz=8    train_batch 可任意 8 倍数
-    # NNODES=6 TP=4 → DP=12, minimal_bsz=12  train_batch 需 12 倍数（含质因子 3，注意）
-    data.train_batch_size=384
+    # NNODES=2 TP=4 → DP=4, minimal_bsz=4    train_batch × rollout.n % minimal_bsz == 0
+    # NNODES=4 TP=4 → DP=8, minimal_bsz=8    
+    # NNODES=6 TP=4 → DP=12, minimal_bsz=12  
+    data.train_batch_size=512
     data.max_prompt_length=8192
     data.max_response_length=16384
     data.truncation='error'
@@ -241,12 +241,12 @@ ACTOR=(
     actor_rollout_ref.actor.optim.lr=1e-6
     # verl 里 train_batch_size 和 ppo_mini_batch_size 的单位都是 prompt 数
     # 必须 train_batch % mini_batch == 0
-    actor_rollout_ref.actor.ppo_mini_batch_size=96
+    actor_rollout_ref.actor.ppo_mini_batch_size=128
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
     # use_dynamic_bsz=False 时这行无效（GDN 必须 False）
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096
     actor_rollout_ref.actor.use_dynamic_bsz=False
-    actor_rollout_ref.actor.use_kl_loss=False
+    actor_rollout_ref.actor.use_kl_loss=True
     actor_rollout_ref.actor.kl_loss_coef=0.01
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
     actor_rollout_ref.actor.entropy_coeff=0
@@ -299,6 +299,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.val_kwargs.top_p=1.0
     actor_rollout_ref.rollout.val_kwargs.top_k=-1
     actor_rollout_ref.rollout.val_kwargs.temperature=0
+    # False uses greedy sampling
     actor_rollout_ref.rollout.val_kwargs.do_sample=False
 )
 
@@ -346,20 +347,21 @@ elif [[ "${REWARD_MODE}" == "disrm" ]]; then
 elif [[ "${REWARD_MODE}" == "genrm" ]]; then
     REWARD+=(
         reward.reward_model.enable=True
-        reward.reward_model.enable_resource_pool=False
+        # colocate
+        reward.reward_model.enable_resource_pool=False 
         reward.reward_model.model_path=${GRM_MODEL_PATH}
         reward.reward_model.rollout.name=${rollout_name}
         reward.reward_model.rollout.dtype=bfloat16
         reward.reward_model.rollout.tensor_model_parallel_size=${GEN_RM_TP}
         reward.reward_model.rollout.gpu_memory_utilization=${GRM_GPU_MEM}
-        reward.reward_model.rollout.prompt_length=2048
+        reward.reward_model.rollout.prompt_length=8192
         reward.reward_model.rollout.response_length=1024
         reward.reward_model.rollout.skip_tokenizer_init=False
         reward.custom_reward_function.path=${REWARD_FN_PATH}
         reward.custom_reward_function.name=${REWARD_FN_NAME}
         +reward.custom_reward_function.reward_kwargs.grm_temperature=0.0
         +reward.custom_reward_function.reward_kwargs.grm_top_p=1.0
-        +reward.custom_reward_function.reward_kwargs.grm_max_tokens=512
+        +reward.custom_reward_function.reward_kwargs.grm_max_tokens=1024
     )
 else
     echo "Invalid REWARD_MODE=${REWARD_MODE}, expected one of: rule|disrm|genrm"
@@ -374,6 +376,11 @@ TRAINER=(
     trainer.default_local_dir=${CKPTS_DIR}
     trainer.n_gpus_per_node=8
     trainer.nnodes=${NNODES}
+    # Resume mode: "auto", "disable", or "resume_path"
+    # "auto": resume from last checkpoint if available
+    # "disable": start from scratch
+    # "resume_path": resume from a user-defined path
+    # trainer.resume_mode=auto 
     trainer.save_freq=50
     trainer.val_before_train=True
     trainer.test_freq=10

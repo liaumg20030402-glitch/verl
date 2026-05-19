@@ -95,13 +95,15 @@ def compute_score_blzk_rule(
     verl 自定义奖励函数入口（同步版本）。
     函数签名遵循 dapo/naive reward manager 约定。
     """
-    target = ground_truth
-    if not target and isinstance(extra_info, dict):
-        target = extra_info.get("target", "")
-
-    score, detail = judge_blzk_answer(solution_str, target)
+    # ground_truth 和 extra_info["target"] 在 convert_data_to_verl_rl.py 里同源,
+    # 直接用 ground_truth 即可,不再做 fallback。
+    score, detail = judge_blzk_answer(solution_str, ground_truth)
+    info = extra_info or {}
     return {
         "score": float(score),
         "pred": detail.get("pred", ""),
         "judge_reason": detail.get("reason", "unknown"),
+        # 透传样本元信息便于 case study / 分桶分析
+        "id": str(info.get("id", "")),
+        "hardness": str(info.get("hardness", "")),
     }

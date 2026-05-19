@@ -36,130 +36,74 @@ def _build_judge_prompt(question: str, ground_truth: str, model_answer: str) -> 
 
 
 def _clean_answer_text(text: str) -> str:
-    """清洗模型输出：移除 <think>...</think> 思考块，保留最终答案文本。
+    """清洗 actor 模型输出：保留 </think> 之后的最终回答。
+
+    覆盖三种情形：
+      1) 标准 `<think>...</think>实际答案`
+      2) Qwen3.5 / Qwen3 原生 thinking：chat template 在 prompt 末尾就追加了
+         `<think>`，模型实际只输出 `thinking...</think>实际答案`，**没有 `<think>` 开始
+         标签**。旧实现用 `<think>.*?</think>` 成对正则会漏掉这种情况。
+      3) 没有 `</think>` 的非 thinking 输出，整段保留。
     """
     s = str(text or "")
-    s = re.sub(r"<think>.*?</think>", "", s, flags=re.DOTALL)
+    if "</think>" in s:
+        s = s.rsplit("</think>", 1)[-1]
     return s.strip()
 
 
-def _normalize_option_answer(text: str) -> str:
-    """将选项归一化为"去重 + 字母排序"的大写字符串。
-    确保 'CBA' 与 'ABC' 归一化后完全一致。
+def _sanitize_judge_response(text: str) -> str:
+    """清洗 GenRM judge 模型的输出，便于后续直接 ``json.loads``。
+
+    处理两件事：
+      1. **thinking 块**：若文本中出现 ``</think>``，只保留最后一个 ``</think>`` 之后的内容。
+         兼容带 thinking 的 GenRM（如 Qwen3-Instruct 系列）。
+      2. **Markdown 代码围栏**：若有 ```json ... ```，提取围栏内内容；否则剥掉残缺围栏标记。
     """
-    s = str(text or "").upper()
-    s = s.replace(" ", "").replace(",", "")
-    s = re.sub(r"[^A-Z]", "", s)
-    return "".join(sorted(set(s)))
-
-
-def _preprocess_jsonish_text(text: str) -> str:
-    """在抽取 JSON 前，先归一化空白并修正常见 JSON 标点错误。"""
-    if not isinstance(text, str):
-        return ""
-    s = text.replace("\xa0", " ").replace("\u200b", "")
-    s = s.replace("}，", "},").replace("]，", "],")
-    s = s.replace('"：', '":').replace("\u201c：", "\u201c:")
-    return s
-
-
-def _balanced_json_object(text: str) -> str:
-    """按花括号深度提取首个顶层 JSON 对象，忽略字符串内部花括号。"""
-    s = str(text or "").strip()
-    if not s:
-        return ""
-    start = s.find("{")
-    if start < 0:
-        return ""
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(start, len(s)):
-        ch = s[i]
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return s[start : i + 1]
-    return ""
-
-
-def extract_json_from_text(text: str) -> str | None:
-    """从模型输出中抽取 JSON 对象子串。
-    兼容 markdown 代码块、前后自然语言及常见标点噪声。
-    """
-    s = _preprocess_jsonish_text(text)
-    if not s:
-        return None
-
-    # 优先处理 Markdown ```json ... ``` 或 ``` ... ``` 代码块
-    fence = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
-    for m in fence.finditer(s):
-        inner = m.group(1).strip()
-        obj = _balanced_json_object(inner)
-        if obj:
-            return obj
-
-    # 从首个 '{' 到末尾 '}' 兜底（多对象场景可能不准确）
-    start, end = s.find("{"), s.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        candidate = s[start : end + 1]
-        obj = _balanced_json_object(candidate)
-        if obj:
-            return obj
-
-    # 对整段文本做平衡扫描兜底
-    obj = _balanced_json_object(s)
-    return obj if obj else None
-
-
-def _parse_json_dict(text: str) -> dict | None:
-    """对抽取出的 JSON 进行 loads，成功且为 dict 则返回，否则返回 None。"""
-    raw = extract_json_from_text(text)
-    if not raw:
-        return None
-    try:
-        obj = json.loads(raw)
-        return obj if isinstance(obj, dict) else None
-    except Exception:
-        return None
+    s = str(text or "")
+    if "</think>" in s:
+        s = s.rsplit("</think>", 1)[-1]
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", s, re.IGNORECASE)
+    if fence_match:
+        s = fence_match.group(1)
+    else:
+        s = re.sub(r"^```(?:json)?\s*", "", s.strip(), flags=re.IGNORECASE)
+        s = re.sub(r"\s*```$", "", s)
+    return s.strip()
 
 
 def _parse_judge_fields(text: str) -> tuple[str, str, float]:
     """从裁判模型回复中解析出 extracted_answer、reasoning 和 score。
-    解析失败时 score 默认 0.0
+
+    简化逻辑：sanitize 后直接 ``json.loads``。
+    失败时用正则从**原始文本**兜底抓 score，避免 reward 全 0 导致梯度消失。
     """
-    s = str(text or "").strip()
     extracted = ""
     reasoning = ""
     score = 0.0
 
-    obj = _parse_json_dict(s)
-    if obj is not None:
-        extracted = str(obj.get("extracted_answer", "") or "")
-        reasoning = str(obj.get("reasoning", "") or "")
+    clean = _sanitize_judge_response(text)
+    if clean:
         try:
-            score = float(obj.get("score", 0.0))
+            obj = json.loads(clean)
+            if isinstance(obj, dict):
+                extracted = str(obj.get("extracted_answer", "") or "")
+                reasoning = str(obj.get("reasoning", "") or "")
+                try:
+                    score = float(obj.get("score", 0.0))
+                except Exception:
+                    score = 0.0
+                return extracted, reasoning, score
+        except Exception:
+            pass
+
+    # JSON 解析失败兜底：从原始文本里直接抓 0 / 0.5 / 1 这三种合法 score
+    # （_SCORE_RE 在文件顶部定义，仅匹配这三个合法值，避免误抓）
+    m = _SCORE_RE.findall(str(text or ""))
+    if m:
+        try:
+            score = float(m[-1])
         except Exception:
             score = 0.0
-        return extracted, reasoning, score
-
-    # JSON 解析失败时，用正则从文本中直接抓取分数（_SCORE_RE 本身只匹配 0/0.5/1）
-    m = _SCORE_RE.findall(s)
-    if m:
-        score = float(m[-1])
     return extracted, reasoning, score
 
 
@@ -194,7 +138,7 @@ async def compute_score_medexam_genrm(
 
     question = (extra_info or {}).get("question") or (extra_info or {}).get("query") or ""
     clean_solution = _clean_answer_text(solution_str)
-    gt = _normalize_option_answer(ground_truth)
+    gt = str(ground_truth or "").strip()
 
     # 优先从环境变量获取裁判模型名，其次从 kwargs，最后从 tokenizer
     model_name = (
@@ -232,15 +176,19 @@ async def compute_score_medexam_genrm(
         judge_resp = ""
 
     extracted_answer, reasoning, score = _parse_judge_fields(judge_resp)
-    pred = _normalize_option_answer(extracted_answer)
+    pred = str(extracted_answer or "").strip()
     # 保证 score 是可比较的数值，避免异常值污染训练
     try:
         score = float(score)
     except Exception:
         score = 0.0
 
+    info = extra_info or {}
     return {
         "score": score,
         "pred": pred,
-        "reasoning": reasoning,
+        "judge_reason": reasoning,
+        # 透传样本元信息便于 case study / 分桶分析
+        "id": str(info.get("id", "")),
+        "hardness": str(info.get("hardness", "")),
     }

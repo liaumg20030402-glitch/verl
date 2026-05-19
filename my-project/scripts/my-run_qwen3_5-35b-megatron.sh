@@ -237,7 +237,7 @@ ACTOR=(
     # max_token_len must be set when use_dynamic_bsz is True
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096
     actor_rollout_ref.actor.use_dynamic_bsz=False
-    actor_rollout_ref.actor.use_kl_loss=False
+    actor_rollout_ref.actor.use_kl_loss=True
     actor_rollout_ref.actor.kl_loss_coef=0.01
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
     actor_rollout_ref.actor.entropy_coeff=0

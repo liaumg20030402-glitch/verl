@@ -121,9 +121,13 @@ async def compute_score_gsm8k_genrm(
     # Normalize to [0, 1] for PPO/GRPO reward scale
     score = raw_score / 10.0
 
+    info = extra_info or {}
     return {
         "score": score,
         "acc": raw_score >= 9.0,
         "genrm_response": grm_response,
         "genrm_score_1_10": raw_score,
+        # 透传样本元信息便于 case study / 分桶分析
+        "id": str(info.get("id", "")),
+        "hardness": str(info.get("hardness", "")),
     }
