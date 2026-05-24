@@ -40,31 +40,35 @@ export GRM_MODEL_NAME="${GRM_MODEL_NAME:-${GRM_MODEL_PATH}}"
 
 # reward model rollout 资源
 GEN_RM_TP=${GEN_RM_TP:-1}
-GRM_GPU_MEM=${GRM_GPU_MEM:-0.4}
+GRM_GPU_MEM=${GRM_GPU_MEM:-0.35}
 
 export CUDA_HOME=/usr/local/cuda-12.9
 export PATH=${CUDA_HOME}/bin:${PATH}
 export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}
 
-# 加大vllm EngineCore超时
+# 加大 vLLM V1 EngineCore 等 TP worker 的超时（对应 multiproc_executor → shm_broadcast）
+# 兜底首次冷编译，避免 ptxas 编译时间超过默认 60s 被判死亡
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200
+export VLLM_ENGINE_ITERATION_TIMEOUT_S=600
 
-# 编译缓存：全部放到节点本地 /tmp，避免多机共享 NFS 上 worker 并发 JIT 编译竞争
-UNIQUE_ID=${UNIQUE_ID:-$(date +%Y%m%d_%H%M%S)}
-tmp_run_dir="/tmp/jmli27_verl_run_${UNIQUE_ID}"
-export TRITON_CACHE_DIR="${tmp_run_dir}/triton_cache"
-export TORCHINDUCTOR_CACHE_DIR="${tmp_run_dir}/inductor_cache"
-export VLLM_CONFIG_ROOT="${tmp_run_dir}/vllm_config"
-export FLASHINFER_WORKSPACE_BASE="${tmp_run_dir}/flashinfer_cache"
-export FLASHINFER_JIT_DIR="${tmp_run_dir}/flashinfer_cache/jit"
-export XDG_CACHE_HOME="${tmp_run_dir}/xdg_cache"
+
+
+# 编译缓存：按节点持久化到本地 /tmp，跨多次运行共享（参考 vllm#36631 的最终结论）
+# - 不带 UNIQUE_ID：v1/v2 脚本、不同 reward 模式可共用同一份缓存
+# - 按 hostname 隔离：多机时每节点写自己 /tmp，避免 NFS 上 JIT 并发竞争
+
+cache_root="/tmp/jmli27_verl_cache_$(hostname -s)"
+export TRITON_CACHE_DIR="${cache_root}/triton_cache"
+export TORCHINDUCTOR_CACHE_DIR="${cache_root}/inductor_cache"
+export VLLM_CONFIG_ROOT="${cache_root}/vllm_config"
+export FLASHINFER_WORKSPACE_BASE="${cache_root}/flashinfer_cache"
+export FLASHINFER_JIT_DIR="${cache_root}/flashinfer_cache/jit"
+export XDG_CACHE_HOME="${cache_root}/xdg_cache"
 mkdir -p "${TRITON_CACHE_DIR}" "${TORCHINDUCTOR_CACHE_DIR}" "${VLLM_CONFIG_ROOT}" \
          "${FLASHINFER_WORKSPACE_BASE}" "${FLASHINFER_JIT_DIR}" "${XDG_CACHE_HOME}"
 
-# 让 head 清理本节点 NFS HOME 下可能残留的旧 cache
-if [ "${RANK:-0}" == "0" ]; then
-    rm -rf ~/.cache/vllm ~/.cache/torch/inductor ~/.triton/cache ~/.cache/flashinfer 2>/dev/null || true
-fi
+# 不再 rm -rf ~/.cache：缓存 env 已经指向本地 /tmp，HOME 下不会写新内容；
+# 而且持久化缓存的全部意义就是跨运行复用，清掉会让下次启动重新 ptxas 5–10 分钟。
 
 export NNODES=$WORLD_SIZE
 export NODE_RANK=$RANK
@@ -89,9 +93,22 @@ export NCCL_NET=IB
 export NCCL_IB_HCA=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7
 export NCCL_IB_DISABLE=0
 export NCCL_P2P_DISABLE=0
+# 关闭 NVLink SHARP（in-network reduction），改走经典 ring/tree。
+# 多机 H200 + Megatron→vLLM 权重广播 + bf16 大 allgather 已知会触发 NVLS code path hang
+# （参考 NVIDIA/nccl#2167, NVIDIA/nccl#2077, NVIDIA-NeMo/RL#1961）。代价 ~5% 通信吞吐。
+export NCCL_NVLS_ENABLE=0
+
 
 export CUDA_LAUNCH_BLOCKING=0
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+
+# === NCCL flight recorder + debug ===
+export TORCH_NCCL_TRACE_BUFFER_SIZE=20000
+export TORCH_NCCL_DUMP_ON_TIMEOUT=1
+export TORCH_NCCL_DESYNC_DEBUG=1
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=INIT,COLL,NET,ENV
+export NCCL_DEBUG_FILE=/tmp/jmli27_nccl_${HOSTNAME}_%h_%p.log
 
 ############################# Ray 集群初始化（多机）#############################
 # 单机（NNODES=1）：跳过这整段，main_ppo.py 里的 ray.init() 会自己起一个本地集群。
@@ -187,22 +204,32 @@ GEN_TP=${GEN_TP:-8}    # vLLM rollout TP，独立于训练侧 TP
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 
+# === 实验标识与 resume 策略 ===
+# exp_name: 实验标识，**跨多次运行必须稳定**，让 resume_mode=auto 能找到上次的 ckpt。
+#   - 默认按 reward 模式区分（rule / disrm / genrm 三套实验目录互不串扰）
+#   - 要"开新实验从头跑"，改exp_name，新 exp_name 没 ckpt 就自动从头开始
+#   - 同一 exp_name 的多次启动会 resume 同一个 CKPTS_DIR 下最新 ckpt
+# RUN_ID: 每次启动一个新的时间戳，**只用于隔离 log 文件**，不影响 ckpt 路径
+RUN_ID=${RUN_ID:-$(date +%Y%m%d_%H%M%S)}
+
 rollout_name="vllm"
 project_name='verl_grpo_qwen3_5_27b_blzk'
-exp_name="blzk_20251127_${REWARD_MODE}_${UNIQUE_ID}"
+exp_name="blzk_v3_${REWARD_MODE}"   # 不带时间戳：多次启动复用同一 CKPTS_DIR，触发 auto resume
 adv_estimator=grpo
 
 # ===== 本地模型路径 =====
 HF_MODEL_PATH=${HF_MODEL_PATH:-"/train21/medcog/permanent/leijiang19/pretrain_models/Qwen3.5-27B"}
 
 # ===== 本地 parquet 数据路径 =====
-train_path=${train_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_train_fast_verl.parquet"}
-test_path=${test_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_val_fast_verl.parquet"}
+train_path=${train_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/medexam_train_fast_verl.parquet"}
+test_path=${test_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/medexam_val_fast_verl.parquet"}
+
 
 BASE_OUT_DIR="/train21/medcog/permanent/jycai6/jmli27/"
 CKPTS_DIR="${BASE_OUT_DIR}/output/${project_name}/${exp_name}"
-LOG_FILE="${CKPTS_DIR}/grpo_verl_megatron_qwen35_27b_${UNIQUE_ID}.log"
-mkdir -p "${CKPTS_DIR}"
+# log 按 RUN_ID 分文件落到 CKPTS_DIR/logs/，每次崩溃 / 续跑都留独立日志便于对照
+LOG_FILE="${CKPTS_DIR}/logs/run_${RUN_ID}.log"
+mkdir -p "${CKPTS_DIR}" "${CKPTS_DIR}/logs"
 
 ############################# Parameter Arrays #############################
 
@@ -214,7 +241,7 @@ DATA=(
     # NNODES=2 TP=4 → DP=4, minimal_bsz=4    train_batch × rollout.n % minimal_bsz == 0
     # NNODES=4 TP=4 → DP=8, minimal_bsz=8    
     # NNODES=6 TP=4 → DP=12, minimal_bsz=12  
-    data.train_batch_size=512
+    data.train_batch_size=480
     data.max_prompt_length=8192
     data.max_response_length=16384
     data.truncation='error'
@@ -236,10 +263,12 @@ MODEL=(
 )
 
 ACTOR=(
+    actor_rollout_ref.nccl_timeout=1800
     actor_rollout_ref.actor.optim.lr=1e-6
     # verl 里 train_batch_size 和 ppo_mini_batch_size 的单位都是 prompt 数
     # 必须 train_batch % mini_batch == 0
-    actor_rollout_ref.actor.ppo_mini_batch_size=128
+    # mini_batch × rollout.n % minimal_bsz == 0
+    actor_rollout_ref.actor.ppo_mini_batch_size=140
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
     # use_dynamic_bsz=False 时这行无效（GDN 必须 False）
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096
@@ -352,7 +381,7 @@ elif [[ "${REWARD_MODE}" == "genrm" ]]; then
         reward.reward_model.rollout.dtype=bfloat16
         reward.reward_model.rollout.tensor_model_parallel_size=${GEN_RM_TP}
         reward.reward_model.rollout.gpu_memory_utilization=${GRM_GPU_MEM}
-        reward.reward_model.rollout.prompt_length=8192
+        reward.reward_model.rollout.prompt_length=24576
         reward.reward_model.rollout.response_length=1024
         reward.reward_model.rollout.skip_tokenizer_init=False
         reward.custom_reward_function.path=${REWARD_FN_PATH}
@@ -375,11 +404,11 @@ TRAINER=(
     trainer.n_gpus_per_node=8
     trainer.nnodes=${NNODES}
     # Resume mode: "auto", "disable", or "resume_path"
-    # "auto": resume from last checkpoint if available
-    # "disable": start from scratch
+    # "auto": resume from last checkpoint if available  ← 已开启
+    # "disable": start from scratch（要彻底从头训：改 EXP_TAG 或临时把这行换成 disable）
     # "resume_path": resume from a user-defined path
-    # trainer.resume_mode=auto 
-    trainer.save_freq=50
+    trainer.resume_mode=auto
+    trainer.save_freq=10
     trainer.val_before_train=True
     trainer.test_freq=10
     trainer.total_epochs=1

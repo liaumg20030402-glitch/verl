@@ -1737,6 +1737,23 @@ verl 训练能起来，需要**同时满足**：
 | ② mini-batch | `mini_batch × rollout.n % minimal_bsz == 0` | 每次 optimizer.step 的 sample 能均匀分 |
 | ③ batch 层级 | `train_batch % mini_batch == 0` | mini-batch 能整数次切分 train-batch |
 
+DP_train   = n_gpus / (TP_train × PP × CP)    ← 训练侧并行参数
+DP_rollout = n_gpus / GEN_TP                    ← Rollout 侧并行参数
+
+训练时用 TP=4：actor 训练要存 activation + gradient + optimizer state，TP 越大每张卡分摊得越少，但 TP 太大通信开销也大。TP=4 是个 trade-off
+Rollout 时用 GEN_TP=8：vLLM 只做推理，没有 backward，主要瓶颈是 KV cache；TP 越大每张卡 KV 越宽松、能塞下更多并发 sequence。所以 GEN_TP 通常更大
+32 张物理 GPU
+  │
+  ├─ 训练阶段：看作 8 个 model replica × (4-way TP) = 32  → DP_train = 8
+  └─ Rollout 阶段：看作 4 个 vLLM 实例 × (8-way TP) = 32 → DP_rollout = 4
+
+rollout侧整除是软约束，tensor.chunk(N) 自动处理不整除：前几块大、最后一块小，不会崩，但负载不均
+
+Rollout 不均匀的实际代价
+1. **rollout 阶段木桶效应：vLLM 之间不同步，最慢的那个决定 step 时间。多 1 个 prompt 可能多生成几千 token，时间差 10-30%
+2. 训练阶段木桶效应：因为训练侧要求 % DP_train == 0，rollout 不均的 batch 在拼回训练 batch 时仍然要满足训练约束——verl 实际是通过 padding 或 truncate 处理的，会浪费 sample
+3. KV cache 压力分布不均：拿到更多 prompt 的 vLLM 实例 KV 用量更高，可能首先撞到 preempt / O*O*M
+
 其中 `minimal_bsz = (n_gpus / (TP × PP × CP)) × ppo_micro_batch_size_per_gpu`。
 
 ## 为什么必须整除？不只是梯度累积次数

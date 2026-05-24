@@ -100,9 +100,44 @@
 
 ## 五、为什么"刚开始慢、后来变快"
 
-tqdm 显示的 `s/it` 是**从启动到现在的平均值**，不是当前 step 的实际耗时。前几个 step 的 s/it 被两件事拉高：
+两个原因叠加：
 
-### 1. `val_before_train=True` 的开销算到了第 1 个 step
+1. **本质机制**（小节 1）：分布式训练里大量组件是"按需初始化"的，前几步要付一堆一次性开销，之后才进入"全缓存命中"的稳态
+2. **观察偏差**（小节 4）：tqdm 显示的 `s/it` 是**从启动到现在的平均值**，不是当前 step 的实际耗时，所以前几步被拉得格外高
+
+### 1. 本质机制：各种"按需初始化"代价集中在前几步
+
+不只是 RL，**所有分布式训练（SFT / PT / 大规模 eval）都有这个现象**。根本原因是大量组件采用"懒初始化 / 懒 cache"策略：第一次用时建好，之后全部命中缓存。前几步要把所有 cache 暖热，之后才进入稳态。按贡献大小排：
+
+#### a. Kernel JIT 编译（通常占大头）
+- **CUDA Graph capture**：PyTorch / vLLM 对每种 `(batch_size, seq_len)` 形状第一次出现时做一次 graph capture，捕获完后缓存。前几步如果形状变化多，反复触发捕获，每次几百 ms ~ 几秒
+- **Triton / Inductor / CUTLASS kernel 编译**：第一次调用的 FlashAttention、FlashInfer、MoE 路由、自定义 fused kernel 都要 ptxas 编译，单个 kernel 几秒到几十秒。编完写进 `TRITON_CACHE_DIR`，同进程内复用
+- **vLLM kernel autotune**：对部分形状做选优测试，第一次跑会试几种实现挑最快的，之后固定
+
+#### b. CUDA caching allocator 预热
+PyTorch 的 caching allocator 第一次分配走 `cudaMalloc`（系统调用慢、要锁），之后用 free-list 复用。前几步会有大量 cudaMalloc 把显存"涨"到工作集大小，之后基本不再 malloc。单步能差几百 ms，最容易被忽视的一项。
+
+#### c. NCCL communicator 建立 + 算法选择
+**第一次 collective 比之后慢 5-10 倍**。NCCL 第一次执行 allreduce / allgather 时要：探测拓扑（NVLink / NVSwitch / IB）→ 选算法（ring / tree / NVLS）→ 分配通信 buffer → 跨 rank 同步。之后全 cache 在 communicator 里。
+
+H200 + Megatron + vLLM 这套多 process group 的栈，**每对 process group 都要做一次**，所以 NCCL 冷启动开销显著。
+
+#### d. Data loader prefetch 填管
+PyTorch DataLoader 的 prefetch queue 启动时是空的。第 1 步 GPU 干等 IO，第 2 步预取 1 个 batch，依此类推，直到 prefetch queue 填满（4-8 步后）才彻底 IO-overlap。
+
+#### e. 操作系统页缓存
+第一次读模型权重 / parquet 数据走磁盘，后续走 OS page cache（RAM），快几十倍。NFS / 网盘环境下影响特别大。
+
+#### RL 特有的几项
+- **vLLM rollout 的 cuda graph capture**：对常用 batch size 做捕获（日志里能看到 `cudagraph_capture_sizes: [1,2,4,8]` 这种），单引擎要几十秒到几分钟
+- **Megatron → vLLM 第一次权重广播**：建 NCCL communicator + 第一次大 bucket allgather，比稳态慢一两倍
+- **Ref policy 第一次 forward**：和 actor 共享 backbone 编译产物前要单独走一遍 JIT
+
+> **持久化 cache 解决"跨运行"的冷启动，解决不了"同次运行内"的前几步**
+>
+> 脚本里 `TRITON_CACHE_DIR / TORCHINDUCTOR_CACHE_DIR / FLASHINFER_JIT_DIR` 都落到本地 /tmp，跨多次启动能省 5-10 分钟 ptxas 编译。但 **cuda graph capture / NCCL communicator / allocator 状态都是 in-memory 的，无法落盘**，每次新进程都要重做。
+
+### 2. `val_before_train=True` 的开销算到了第 1 个 step
 
 ```
 val_before_train 跑完整 val 集 (896 条)
@@ -116,7 +151,7 @@ val_before_train 跑完整 val 集 (896 条)
 
 **val + 编译 + 实际 step1 全算到 "1 iter"**，所以 step 1 显示 ~96 min，实际后续 step 只要 17-35 min。
 
-### 2. 冷启动开销（一次性）
+### 3. 冷启动开销（一次性）
 
 | 一次性开销 | 大致时间 |
 |---|---|
@@ -130,7 +165,7 @@ val_before_train 跑完整 val 集 (896 条)
 
 这 15-40 min 全部摊到第 1 个 step 的"耗时"里。
 
-### 3. 平均值数学上的收敛
+### 4. 平均值数学上的收敛
 
 ```
 平均 = 累计耗时 / step 数
@@ -169,7 +204,7 @@ val_before_train 跑完整 val 集 (896 条)
 
 这才是真正的步进速度，不要被 tqdm 的"累计平均"骗了。
 
-## 六、面试金句
+## 六、总结
 
 > RL 训练里 tqdm 显示的 s/it 是**累计平均值**，不是当前 step 真实速度。冷启动（vLLM 编译 + Megatron 加载 + val_before_train）会被摊到第 1 个 step 的耗时里，让前 10 个 step 看起来异常慢，但实际单 step 稳态远低于显示值。**判断 RL 训练真实速度，要用相邻两个 step 的 elapsed 差来算**，不要直接看 s/it 平均值。
 >

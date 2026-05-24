@@ -40,31 +40,36 @@ export GRM_MODEL_NAME="${GRM_MODEL_NAME:-${GRM_MODEL_PATH}}"
 
 # reward model rollout 资源
 GEN_RM_TP=${GEN_RM_TP:-1}
-GRM_GPU_MEM=${GRM_GPU_MEM:-0.4}
+GRM_GPU_MEM=${GRM_GPU_MEM:-0.35}
 
 export CUDA_HOME=/usr/local/cuda-12.9
 export PATH=${CUDA_HOME}/bin:${PATH}
 export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}
 
-# 加大vllm EngineCore超时
+# 加大 vLLM V1 EngineCore 等 TP worker 的超时（对应 multiproc_executor → shm_broadcast）
+# 兜底首次冷编译，避免 ptxas 编译时间超过默认 60s 被判死亡
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200
+export VLLM_ENGINE_ITERATION_TIMEOUT_S=600
 
-# 编译缓存：全部放到节点本地 /tmp，避免多机共享 NFS 上 worker 并发 JIT 编译竞争
+# UNIQUE_ID 仅用于隔离本次运行的 checkpoint / log（见 exp_name / CKPTS_DIR / LOG_FILE）
 UNIQUE_ID=${UNIQUE_ID:-$(date +%Y%m%d_%H%M%S)}
-tmp_run_dir="/tmp/jmli27_verl_run_${UNIQUE_ID}"
-export TRITON_CACHE_DIR="${tmp_run_dir}/triton_cache"
-export TORCHINDUCTOR_CACHE_DIR="${tmp_run_dir}/inductor_cache"
-export VLLM_CONFIG_ROOT="${tmp_run_dir}/vllm_config"
-export FLASHINFER_WORKSPACE_BASE="${tmp_run_dir}/flashinfer_cache"
-export FLASHINFER_JIT_DIR="${tmp_run_dir}/flashinfer_cache/jit"
-export XDG_CACHE_HOME="${tmp_run_dir}/xdg_cache"
+
+# 编译缓存：按节点持久化到本地 /tmp，跨多次运行共享（参考 vllm#36631 的最终结论）
+# - 不带 UNIQUE_ID：v1/v2 脚本、不同 reward 模式可共用同一份缓存
+# - 按 hostname 隔离：多机时每节点写自己 /tmp，避免 NFS 上 JIT 并发竞争
+
+cache_root="/tmp/jmli27_verl_cache_$(hostname -s)"
+export TRITON_CACHE_DIR="${cache_root}/triton_cache"
+export TORCHINDUCTOR_CACHE_DIR="${cache_root}/inductor_cache"
+export VLLM_CONFIG_ROOT="${cache_root}/vllm_config"
+export FLASHINFER_WORKSPACE_BASE="${cache_root}/flashinfer_cache"
+export FLASHINFER_JIT_DIR="${cache_root}/flashinfer_cache/jit"
+export XDG_CACHE_HOME="${cache_root}/xdg_cache"
 mkdir -p "${TRITON_CACHE_DIR}" "${TORCHINDUCTOR_CACHE_DIR}" "${VLLM_CONFIG_ROOT}" \
          "${FLASHINFER_WORKSPACE_BASE}" "${FLASHINFER_JIT_DIR}" "${XDG_CACHE_HOME}"
 
-# 让 head 清理本节点 NFS HOME 下可能残留的旧 cache
-if [ "${RANK:-0}" == "0" ]; then
-    rm -rf ~/.cache/vllm ~/.cache/torch/inductor ~/.triton/cache ~/.cache/flashinfer 2>/dev/null || true
-fi
+# 不再 rm -rf ~/.cache：缓存 env 已经指向本地 /tmp，HOME 下不会写新内容；
+# 而且持久化缓存的全部意义就是跨运行复用，清掉会让下次启动重新 ptxas 5–10 分钟。
 
 export NNODES=$WORLD_SIZE
 export NODE_RANK=$RANK
@@ -89,9 +94,22 @@ export NCCL_NET=IB
 export NCCL_IB_HCA=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7
 export NCCL_IB_DISABLE=0
 export NCCL_P2P_DISABLE=0
+# 关闭 NVLink SHARP（in-network reduction），改走经典 ring/tree。
+# 多机 H200 + Megatron→vLLM 权重广播 + bf16 大 allgather 已知会触发 NVLS code path hang
+# （参考 NVIDIA/nccl#2167, NVIDIA/nccl#2077, NVIDIA-NeMo/RL#1961）。代价 ~5% 通信吞吐。
+export NCCL_NVLS_ENABLE=0
+
 
 export CUDA_LAUNCH_BLOCKING=0
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+
+# === NCCL flight recorder + debug ===
+export TORCH_NCCL_TRACE_BUFFER_SIZE=20000
+export TORCH_NCCL_DUMP_ON_TIMEOUT=1
+export TORCH_NCCL_DESYNC_DEBUG=1
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=INIT,COLL,NET,ENV
+export NCCL_DEBUG_FILE=/tmp/jmli27_nccl_${HOSTNAME}_%h_%p.log
 
 ############################# Ray 集群初始化（多机）#############################
 # 单机（NNODES=1）：跳过这整段，main_ppo.py 里的 ray.init() 会自己起一个本地集群。
@@ -100,9 +118,65 @@ RAY_PORT=${RAY_PORT:-$((${MASTER_PORT:-6379} + 1))}
 RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-8265}
 EXPECTED_GPUS=$(( NNODES * 8 ))
 
-# 清理本节点上次运行残留的 ray daemon，避免新 cluster 连到旧的 GCS。
+# 清理本节点上次运行残留的进程和文件，避免：
+# 1) 新 ray cluster 连到旧的 GCS
+# 2) 上次崩溃留下的 vLLM worker 孤儿进程继续占着 TCP 端口（导致下次启动 EADDRINUSE）
 ray stop --force >/dev/null 2>&1 || true
-rm -rf /tmp/ray /tmp/ray_tmp_* 2>/dev/null || true
+
+# ray stop 只杀 ray daemon，不杀 ray actor 派生出去的子进程（vLLM TP worker 等）。
+# 这些孤儿被 init 收养后会一直 hold 着 TCPStore 端口和 GPU 显存，必须显式 pkill。
+#
+# 之前漏杀过的进程名（→ 导致下次启动 EADDRINUSE 在 TCPStore bind 阶段）:
+#   - vLLMHttpServer       (vLLM v1 入口进程)
+#   - EngineCore_DP*       (vLLM v1 engine core，每个 DP 一个)
+#   - Worker_TP*           (vLLM TP worker)
+#   - VllmWorker-*         (multiproc_executor 派生的 worker)
+# 这些名字都不匹配 "vllm" 通配（pkill -f 匹配的是完整 cmdline，但有时 vLLM 子进程
+# 的 cmdline 已经被 setproctitle 改成 Worker_TP0 之类，"vllm" 字符串就漏了）。
+echo "[cleanup] 清理本节点 ray/vllm/verl 残留进程 ..."
+PROC_PATTERNS=(
+    "ray::"
+    "vllm"
+    "vLLMHttpServer"
+    "EngineCore"
+    "Worker_TP"
+    "VllmWorker"
+    "verl\.trainer"
+)
+for pat in "${PROC_PATTERNS[@]}"; do
+    pkill -9 -f "${pat}" 2>/dev/null || true
+done
+
+# 给内核充足时间释放 TCP 端口。Linux 默认 TIME_WAIT 60s，但 SO_REUSEADDR + 大部分
+# 端口在 ~15s 后已经能复用。之前 sleep 5 太短，多机崩溃复跑时容易撞 EADDRINUSE。
+sleep 15
+
+# 检查是否还有残留（独占节点上残留通常是清理时机问题，再 kill 一轮）
+# ⚠️ 重要：不能写 remaining=$(pgrep ... | wc -l)
+#   原因：pgrep 找不到匹配时 exit=1，配合 set -o pipefail → 管道 exit=1
+#         → 命令替换返回 1 → set -e 触发整个脚本退出
+#         这就是为什么"清理越彻底反而越容易死"的元凶。
+# 直接用 pgrep 的 exit code 作为分支条件，避开管道。
+PGREP_RE="ray::|vllm|vLLMHttpServer|EngineCore|Worker_TP|VllmWorker|verl\.trainer"
+if pgrep -af "${PGREP_RE}" >/dev/null 2>&1; then
+    echo "[cleanup] 仍有残留，再补一轮 SIGKILL ..."
+    pgrep -af "${PGREP_RE}" || true
+    pkill -9 -f "${PGREP_RE}" 2>/dev/null || true
+    sleep 5
+fi
+
+# 兜底诊断：列出常用 RPC/rendezvous 端口段的占用情况。如果这里还有 LISTEN，
+# 说明上面没杀干净，新进程 bind 大概率撞 EADDRINUSE。打出来便于事后排查，
+# 不主动 kill（避免误伤系统服务）。
+if command -v ss >/dev/null 2>&1; then
+    LISTEN_LEFT=$(ss -tlnp 2>/dev/null | awk 'NR>1 && $4 ~ /:(4[0-9]{4}|5[0-9]{4}|6[0-9]{4})$/' || true)
+    if [ -n "${LISTEN_LEFT}" ]; then
+        echo "[cleanup] ⚠️  仍有高端口监听（可能是上次残留），新 TCPStore 若撞到这些端口会 EADDRINUSE："
+        echo "${LISTEN_LEFT}"
+    fi
+fi
+
+rm -rf /tmp/ray /tmp/ray_tmp_* /tmp/ray_session_* 2>/dev/null || true
 
 if [ "${NNODES}" -gt 1 ]; then
     # 把 MASTER_ADDR 解析成具体的 IPv4，让 head 绑定的 IP 和 worker 连接的 IP 完全一致。
@@ -196,13 +270,13 @@ adv_estimator=grpo
 HF_MODEL_PATH=${HF_MODEL_PATH:-"/train21/medcog/permanent/leijiang19/pretrain_models/Qwen3.5-27B"}
 
 # ===== 本地 parquet 数据路径 =====
-train_path=${train_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_train_fast_verl.parquet"}
-test_path=${test_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_val_fast_verl.parquet"}
+train_path=${train_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/medexam_train_fast_verl.parquet"}
+test_path=${test_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/medexam_val_fast_verl.parquet"}
 
 BASE_OUT_DIR="/train21/medcog/permanent/jycai6/jmli27/"
 CKPTS_DIR="${BASE_OUT_DIR}/output/${project_name}/${exp_name}"
 LOG_FILE="${CKPTS_DIR}/grpo_verl_megatron_qwen35_27b_${UNIQUE_ID}.log"
-mkdir -p "${CKPTS_DIR}"
+mkdir -p "${CKPTS_DIR}" 
 
 ############################# Parameter Arrays #############################
 
@@ -214,7 +288,7 @@ DATA=(
     # NNODES=2 TP=4 → DP=4, minimal_bsz=4    train_batch × rollout.n % minimal_bsz == 0
     # NNODES=4 TP=4 → DP=8, minimal_bsz=8    
     # NNODES=6 TP=4 → DP=12, minimal_bsz=12  
-    data.train_batch_size=512
+    data.train_batch_size=384
     data.max_prompt_length=8192
     data.max_response_length=16384
     data.truncation='error'
@@ -236,10 +310,12 @@ MODEL=(
 )
 
 ACTOR=(
+    actor_rollout_ref.nccl_timeout=1800
     actor_rollout_ref.actor.optim.lr=1e-6
     # verl 里 train_batch_size 和 ppo_mini_batch_size 的单位都是 prompt 数
     # 必须 train_batch % mini_batch == 0
-    actor_rollout_ref.actor.ppo_mini_batch_size=128
+    # mini_batch × rollout.n % minimal_bsz == 0
+    actor_rollout_ref.actor.ppo_mini_batch_size=96
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
     # use_dynamic_bsz=False 时这行无效（GDN 必须 False）
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096
@@ -276,7 +352,7 @@ ACTOR=(
 ROLLOUT=(
     actor_rollout_ref.rollout.name=${rollout_name}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP}
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.55
     actor_rollout_ref.rollout.n=8
     actor_rollout_ref.rollout.mode=async
     actor_rollout_ref.rollout.dtype=bfloat16
@@ -352,7 +428,7 @@ elif [[ "${REWARD_MODE}" == "genrm" ]]; then
         reward.reward_model.rollout.dtype=bfloat16
         reward.reward_model.rollout.tensor_model_parallel_size=${GEN_RM_TP}
         reward.reward_model.rollout.gpu_memory_utilization=${GRM_GPU_MEM}
-        reward.reward_model.rollout.prompt_length=8192
+        reward.reward_model.rollout.prompt_length=24576
         reward.reward_model.rollout.response_length=1024
         reward.reward_model.rollout.skip_tokenizer_init=False
         reward.custom_reward_function.path=${REWARD_FN_PATH}
