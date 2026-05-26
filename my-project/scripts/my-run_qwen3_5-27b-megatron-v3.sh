@@ -25,7 +25,14 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 set -xeuo pipefail
 
 # ===== Reward mode 配置 =====
-# REWARD_MODE: rule | disrm | genrm
+# REWARD_MODE: default | rule | disrm | genrm
+#   default: 不设 custom_reward_function，让 verl 按 parquet 里 data_source 字段
+#            自动路由到内置评分器（gsm8k / MATH / MATH-500 / codecontests / ...）。
+#            适用于跑 verl examples/data_preprocess/ 里官方预处理过的数据集。
+#   rule:    显式指定 custom_reward_function，覆盖自动路由（用于自定义规则评分，
+#            比如本项目的医疗题）
+#   disrm:   discriminative reward model（一个打分/分类模型当裁判）
+#   genrm:   generative reward model（一个 LLM 当裁判）
 REWARD_MODE=${REWARD_MODE:-rule}
 REWARD_MANAGER_NAME=${REWARD_MANAGER_NAME:-dapo}
 
@@ -97,12 +104,14 @@ export NCCL_P2P_DISABLE=0
 # 多机 H200 + Megatron→vLLM 权重广播 + bf16 大 allgather 已知会触发 NVLS code path hang
 # （参考 NVIDIA/nccl#2167, NVIDIA/nccl#2077, NVIDIA-NeMo/RL#1961）。代价 ~5% 通信吞吐。
 export NCCL_NVLS_ENABLE=0
+export NCCL_ALGO=Ring
 
 
 export CUDA_LAUNCH_BLOCKING=0
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
 # === NCCL flight recorder + debug ===
+export TORCH_FR_BUFFER_SIZE=20000  
 export TORCH_NCCL_TRACE_BUFFER_SIZE=20000
 export TORCH_NCCL_DUMP_ON_TIMEOUT=1
 export TORCH_NCCL_DESYNC_DEBUG=1
@@ -263,7 +272,7 @@ MODEL=(
 )
 
 ACTOR=(
-    actor_rollout_ref.nccl_timeout=1800
+    # actor_rollout_ref.nccl_timeout=1800
     actor_rollout_ref.actor.optim.lr=1e-6
     # verl 里 train_batch_size 和 ppo_mini_batch_size 的单位都是 prompt 数
     # 必须 train_batch % mini_batch == 0
@@ -309,6 +318,12 @@ ROLLOUT=(
     actor_rollout_ref.rollout.n=8
     actor_rollout_ref.rollout.mode=async
     actor_rollout_ref.rollout.dtype=bfloat16
+    # ⭐ GDN prefill backend: flashinfer (默认) → triton
+    #   flashinfer 的 chunk_gated_delta_rule kernel 在 CUDA Graph replay 下有 mbarrier
+    #   死锁 bug，导致 TP rank 间 desync → NCCL allgather watchdog 触发挂死。
+    #   参考: flashinfer-ai/flashinfer#3329, verl-project/verl#5659 评论 9, vllm#41862
+    #   代价: 单 GDN kernel 慢 1.7-1.9×，整体 rollout 慢 5-10%
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.gdn_prefill_backend=triton
     #   权重同步bucket 传输
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
@@ -328,6 +343,10 @@ ROLLOUT=(
     actor_rollout_ref.rollout.val_kwargs.temperature=0
     # False uses greedy sampling
     actor_rollout_ref.rollout.val_kwargs.do_sample=False
+
+    actor_rollout_ref.rollout.enforce_eager=True
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.pass_config.fuse_allreduce_rms=False
+
 )
 
 REF=(
@@ -346,13 +365,21 @@ ALGORITHM=(
     algorithm.use_kl_in_reward=False
 )
 
-# Reward 参数（支持 3 种模式：rule / disrm / genrm）
+# Reward 参数（支持 4 种模式：default / rule / disrm / genrm）
 REWARD=(
     reward.num_workers=8
     reward.reward_manager.name=${REWARD_MANAGER_NAME}
 )
 
-if [[ "${REWARD_MODE}" == "rule" ]]; then
+if [[ "${REWARD_MODE}" == "default" ]]; then
+    # 走 verl 内置 default_compute_score：按 parquet 里每行的 data_source 字段
+    # 路由到对应内置评分器（见 verl/utils/reward_score/__init__.py）。
+    # ⚠️ 故意不设 reward.custom_reward_function —— 设了会覆盖自动路由。
+    # 用法：parquet 必须由 verl 官方预处理脚本生成（带 data_source / ground_truth 字段）。
+    REWARD+=(
+        reward.reward_model.enable=False
+    )
+elif [[ "${REWARD_MODE}" == "rule" ]]; then
     REWARD+=(
         reward.reward_model.enable=False
         reward.custom_reward_function.path=${REWARD_FN_PATH}
@@ -391,7 +418,7 @@ elif [[ "${REWARD_MODE}" == "genrm" ]]; then
         +reward.custom_reward_function.reward_kwargs.grm_max_tokens=1024
     )
 else
-    echo "Invalid REWARD_MODE=${REWARD_MODE}, expected one of: rule|disrm|genrm"
+    echo "Invalid REWARD_MODE=${REWARD_MODE}, expected one of: default|rule|disrm|genrm"
     exit 1
 fi
 
@@ -405,9 +432,10 @@ TRAINER=(
     trainer.nnodes=${NNODES}
     # Resume mode: "auto", "disable", or "resume_path"
     # "auto": resume from last checkpoint if available  ← 已开启
-    # "disable": start from scratch（要彻底从头训：改 EXP_TAG 或临时把这行换成 disable）
+    # "disable": start from scratch（要彻底从头训：改 expname 或临时把这行换成 disable）
     # "resume_path": resume from a user-defined path
     trainer.resume_mode=auto
+    trainer.max_actor_ckpt_to_keep=2    # 只留最近 2 个 actor ckpt
     trainer.save_freq=10
     trainer.val_before_train=True
     trainer.test_freq=10

@@ -118,65 +118,9 @@ RAY_PORT=${RAY_PORT:-$((${MASTER_PORT:-6379} + 1))}
 RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-8265}
 EXPECTED_GPUS=$(( NNODES * 8 ))
 
-# 清理本节点上次运行残留的进程和文件，避免：
-# 1) 新 ray cluster 连到旧的 GCS
-# 2) 上次崩溃留下的 vLLM worker 孤儿进程继续占着 TCP 端口（导致下次启动 EADDRINUSE）
+# 清理本节点上次运行残留的 ray daemon，避免新 cluster 连到旧的 GCS。
 ray stop --force >/dev/null 2>&1 || true
-
-# ray stop 只杀 ray daemon，不杀 ray actor 派生出去的子进程（vLLM TP worker 等）。
-# 这些孤儿被 init 收养后会一直 hold 着 TCPStore 端口和 GPU 显存，必须显式 pkill。
-#
-# 之前漏杀过的进程名（→ 导致下次启动 EADDRINUSE 在 TCPStore bind 阶段）:
-#   - vLLMHttpServer       (vLLM v1 入口进程)
-#   - EngineCore_DP*       (vLLM v1 engine core，每个 DP 一个)
-#   - Worker_TP*           (vLLM TP worker)
-#   - VllmWorker-*         (multiproc_executor 派生的 worker)
-# 这些名字都不匹配 "vllm" 通配（pkill -f 匹配的是完整 cmdline，但有时 vLLM 子进程
-# 的 cmdline 已经被 setproctitle 改成 Worker_TP0 之类，"vllm" 字符串就漏了）。
-echo "[cleanup] 清理本节点 ray/vllm/verl 残留进程 ..."
-PROC_PATTERNS=(
-    "ray::"
-    "vllm"
-    "vLLMHttpServer"
-    "EngineCore"
-    "Worker_TP"
-    "VllmWorker"
-    "verl\.trainer"
-)
-for pat in "${PROC_PATTERNS[@]}"; do
-    pkill -9 -f "${pat}" 2>/dev/null || true
-done
-
-# 给内核充足时间释放 TCP 端口。Linux 默认 TIME_WAIT 60s，但 SO_REUSEADDR + 大部分
-# 端口在 ~15s 后已经能复用。之前 sleep 5 太短，多机崩溃复跑时容易撞 EADDRINUSE。
-sleep 15
-
-# 检查是否还有残留（独占节点上残留通常是清理时机问题，再 kill 一轮）
-# ⚠️ 重要：不能写 remaining=$(pgrep ... | wc -l)
-#   原因：pgrep 找不到匹配时 exit=1，配合 set -o pipefail → 管道 exit=1
-#         → 命令替换返回 1 → set -e 触发整个脚本退出
-#         这就是为什么"清理越彻底反而越容易死"的元凶。
-# 直接用 pgrep 的 exit code 作为分支条件，避开管道。
-PGREP_RE="ray::|vllm|vLLMHttpServer|EngineCore|Worker_TP|VllmWorker|verl\.trainer"
-if pgrep -af "${PGREP_RE}" >/dev/null 2>&1; then
-    echo "[cleanup] 仍有残留，再补一轮 SIGKILL ..."
-    pgrep -af "${PGREP_RE}" || true
-    pkill -9 -f "${PGREP_RE}" 2>/dev/null || true
-    sleep 5
-fi
-
-# 兜底诊断：列出常用 RPC/rendezvous 端口段的占用情况。如果这里还有 LISTEN，
-# 说明上面没杀干净，新进程 bind 大概率撞 EADDRINUSE。打出来便于事后排查，
-# 不主动 kill（避免误伤系统服务）。
-if command -v ss >/dev/null 2>&1; then
-    LISTEN_LEFT=$(ss -tlnp 2>/dev/null | awk 'NR>1 && $4 ~ /:(4[0-9]{4}|5[0-9]{4}|6[0-9]{4})$/' || true)
-    if [ -n "${LISTEN_LEFT}" ]; then
-        echo "[cleanup] ⚠️  仍有高端口监听（可能是上次残留），新 TCPStore 若撞到这些端口会 EADDRINUSE："
-        echo "${LISTEN_LEFT}"
-    fi
-fi
-
-rm -rf /tmp/ray /tmp/ray_tmp_* /tmp/ray_session_* 2>/dev/null || true
+rm -rf /tmp/ray /tmp/ray_tmp_* 2>/dev/null || true
 
 if [ "${NNODES}" -gt 1 ]; then
     # 把 MASTER_ADDR 解析成具体的 IPv4，让 head 绑定的 IP 和 worker 连接的 IP 完全一致。
