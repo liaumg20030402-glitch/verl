@@ -61,7 +61,7 @@ export VLLM_ENGINE_ITERATION_TIMEOUT_S=600
 
 
 # 编译缓存：按节点持久化到本地 /tmp，跨多次运行共享（参考 vllm#36631 的最终结论）
-# - 不带 UNIQUE_ID：v1/v2 脚本、不同 reward 模式可共用同一份缓存
+# - 不带 UNIQUE_ID，可共用同一份缓存
 # - 按 hostname 隔离：多机时每节点写自己 /tmp，避免 NFS 上 JIT 并发竞争
 
 cache_root="/tmp/jmli27_verl_cache_$(hostname -s)"
@@ -104,7 +104,7 @@ export NCCL_P2P_DISABLE=0
 # 多机 H200 + Megatron→vLLM 权重广播 + bf16 大 allgather 已知会触发 NVLS code path hang
 # （参考 NVIDIA/nccl#2167, NVIDIA/nccl#2077, NVIDIA-NeMo/RL#1961）。代价 ~5% 通信吞吐。
 export NCCL_NVLS_ENABLE=0
-export NCCL_ALGO=Ring
+
 
 
 export CUDA_LAUNCH_BLOCKING=0
@@ -343,9 +343,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.val_kwargs.temperature=0
     # False uses greedy sampling
     actor_rollout_ref.rollout.val_kwargs.do_sample=False
-
-    actor_rollout_ref.rollout.enforce_eager=True
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.pass_config.fuse_allreduce_rms=False
 
 )
 
