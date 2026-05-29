@@ -15,7 +15,7 @@
 #   - 配置数组里去掉所有 MoE 相关 override（aux_loss / z_loss / vanilla_mbridge）
 
 source /home3/medcog/jycai6/.bashrc
-conda activate verl_rl
+conda activate verl_rl_v2
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_USE_V1=1
@@ -277,15 +277,20 @@ ACTOR=(
     # verl 里 train_batch_size 和 ppo_mini_batch_size 的单位都是 prompt 数
     # 必须 train_batch % mini_batch == 0
     # mini_batch × rollout.n % minimal_bsz == 0
-    actor_rollout_ref.actor.ppo_mini_batch_size=140
+    actor_rollout_ref.actor.ppo_mini_batch_size=120
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
     # use_dynamic_bsz=False 时这行无效（GDN 必须 False）
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096
     actor_rollout_ref.actor.use_dynamic_bsz=False
+    # DAPO recipe: no KL loss / no KL reward, use Clip-Higher and token-level loss.
     actor_rollout_ref.actor.use_kl_loss=False
-    actor_rollout_ref.actor.kl_loss_coef=0.01
+    actor_rollout_ref.actor.kl_loss_coef=0.0
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
     actor_rollout_ref.actor.entropy_coeff=0
+    actor_rollout_ref.actor.clip_ratio_low=0.2
+    actor_rollout_ref.actor.clip_ratio_high=0.28
+    actor_rollout_ref.actor.clip_ratio_c=10.0
+    actor_rollout_ref.actor.loss_agg_mode=token-mean
 
     actor_rollout_ref.actor.megatron.use_mbridge=True
     # 27B 是 dense，不需要 vanilla_mbridge（vanilla_mbridge 主要给 MoE 用）
@@ -343,7 +348,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.val_kwargs.temperature=0
     # False uses greedy sampling
     actor_rollout_ref.rollout.val_kwargs.do_sample=False
-
 )
 
 REF=(
@@ -360,12 +364,22 @@ REF=(
 ALGORITHM=(
     algorithm.adv_estimator=${adv_estimator}
     algorithm.use_kl_in_reward=False
+    # Dynamic Sampling: filter groups whose reward metric is all the same.
+    +algorithm.filter_groups.enable=True
+    +algorithm.filter_groups.metric=score
+    +algorithm.filter_groups.max_num_gen_batches=10
 )
 
 # Reward 参数（支持 4 种模式：default / rule / disrm / genrm）
 REWARD=(
     reward.num_workers=8
     reward.reward_manager.name=${REWARD_MANAGER_NAME}
+    # Overlong reward shaping: max response is 16k; the last 8k tokens are the linear penalty buffer.
+    +reward.reward_kwargs.overlong_buffer_cfg.enable=True
+    +reward.reward_kwargs.overlong_buffer_cfg.len=8192
+    +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=1.0
+    +reward.reward_kwargs.overlong_buffer_cfg.log=False
+    +reward.reward_kwargs.max_resp_len=16384
 )
 
 if [[ "${REWARD_MODE}" == "default" ]]; then
@@ -432,8 +446,8 @@ TRAINER=(
     # "disable": start from scratch（要彻底从头训：改 expname 或临时把这行换成 disable）
     # "resume_path": resume from a user-defined path
     trainer.resume_mode=auto
-    trainer.max_actor_ckpt_to_keep=2    # 只留最近 2 个 actor ckpt
-    trainer.save_freq=10
+    # trainer.max_actor_ckpt_to_keep=2    # 只留最近 2 个 actor ckpt
+    trainer.save_freq=50
     trainer.val_before_train=True
     trainer.test_freq=10
     trainer.total_epochs=1
