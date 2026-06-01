@@ -100,25 +100,60 @@
 % ====================== 实习经历 ======================
 \section{实习经历}
 
-\entry{科大讯飞股份有限公司 ---- 讯飞医疗大模型实习}{2025年11月 - 2026年05月}
+\entry{科大讯飞股份有限公司 ---- 讯飞医疗大模型实习}{2025年12月 - 2026年05月}
 
-% -------- 项目一：病历质控 GRPO --------
-\textbf{病历质控规则奖励 GRPO 训练（Qwen3.5-27B / Megatron / vLLM）}
+% -------- 环境搭建 --------
+\textbf{H200 多机 Post-training 训练环境从零搭建（SFT + GRPO）}
 \begin{itemize}
-    \item \textbf{数据构造与难度配比:}基于线上 bad case 对模型思维链进行归因分析，抽样 500 条 CoT、15{,}249 个推理步骤，抽象出涵盖推理正确性、规则逻辑、知识准确性等 10 维 step-level 错误标签，定位错误主要集中在前 3 步；筛选难度适中（模型单步成功率 30\%--70\%）样本构建训练集，确保 GRPO 组内 reward 方差不为零，避免全 0/全 1 group 产生无效梯度。
-    \item \textbf{规则奖励函数设计:}实现 \texttt{compute\_score\_blzk\_rule}，核心设计包括：(1) 自动剥离 Qwen3.5 native thinking 模式的 \texttt{<think>} 块（覆盖 chat template 追加开始标签缺失的边界情况）；(2) 支持 5 种合法 JSON key 组合的精确模式匹配，对格式变化鲁棒；(3) 全角引号等中文噪声规范化；产出 0/1 二元奖励并附加 \texttt{judge\_reason} 分类（ok / mismatch / json\_not\_found / json\_parse\_failed / key\_mode\_not\_matched），用于训练全程实时监控。
-    \item \textbf{GRPO 训练配置:}基于 verl 框架，Megatron 后端（TP=4、PP=1）+ vLLM 异步 rollout（TP=8），采用 dapo reward manager 配合 overlong reward shaping 抑制长 response 截断引入的奖励噪声。
-    \item \textbf{训练效果:}在 2{,}000 条内部病历质控测试集上，F1 值从基线 \textbf{87.4\%} 提升至 \textbf{89.27\%}；观察到精确率上升而召回率下降，分析为 RL 使模型在不确定时趋向保守（倾向保留"合格"判断规避错误），计划引入更多难负样本调整难度分布以修正。
-    \item \textbf{熵坍塌防御实验（设计中）:}观察到训练中 entropy 呈下降趋势；设计两组对照实验：(A) 开启 KL loss（$\lambda_\text{KL}=0.01$）vs 关闭；(B) 对称 clip（$\varepsilon=0.2$）vs 非对称 clip-higher（$\varepsilon_\text{high}=0.28$），分析各配置对 entropy 维持与最终 F1 的影响。
+    \item 从零完成 H200 多机集群 + qwen3.5 post-training 训练环境部署和调试（verl / Megatron-LM / vLLM / Ray / Swift）；
+    \item 调试解决训练过程中遇到的报错bug，如训练随机崩溃等，确保训练环境和脚本稳定可复用。
 \end{itemize}
 
-% -------- 项目二：病历生成 GenRM（进行中）--------
-\textbf{病历生成 GenRM GRPO 训练（进行中）}
+\textbf{{SFT 医学数据全量微调与分析（Qwen3.5-27B）}}
 \begin{itemize}
-    \item \textbf{任务背景与难点:}从医患对话自动生成结构化病历，属于开放式生成任务，无标准参考答案；Qwen3.5-27B zero-shot 与 SFT 版本在 LLM-as-Judge 评测下得分均不理想；规则奖励无法处理生成质量的语义维度，选用生成式奖励模型（GenRM）驱动 GRPO。
-    \item \textbf{GenRM 方案设计:}以大模型作为奖励模型，对生成病历的完整性、结构规范性、信息忠实度等维度进行细粒度评分；设计对应评测 prompt 与 rubric，确保奖励信号与人工评估高度对齐。
-    \item \textbf{数据与评测:}整理医患对话--病历配对数据，通过 LLM 打分建立定量基线；\textbf{[待补充:数据量、评测基线分数]}。
+    \item 基于 Swift 框架（Megatron后端）完成 Qwen3.5-27B 全量 SFT 训练（230 万条医学数据）；对 SFT 后 IFEval 指令遵循能力下降进行归因分析，定位为思维链缩短与训练数据分布偏移，提供改进建议。
 \end{itemize}
+
+% -------- 病历质控 GRPO --------
+\textbf{病历质控规则奖励 GRPO 训练（Qwen3.5-27B ）}
+\begin{itemize}
+    \item 基于 verl 框架（Megatron + vLLM ），使用 6 万条病历质控数据对 Qwen3.5-27B 进行 GRPO 训练；
+    \item 设计规则奖励函数，产出 0/1 奖励及 \texttt{judge\_reason} 分类标签（ok / mismatch / json\_not\_found 等）实时监控训练质量。
+    \item 在 2{,}000 条验收集上 F1 值从基线 \textbf{87.4\%} 提升至 \textbf{89.27\%}；观察到精确率上升、召回率下降，分析为模型趋向保守输出；
+    \item 进行不同训练数据难度配比实验和DAPO对照实验分析实验结果。
+\end{itemize}
+
+% -------- 病历生成 GenRM --------
+\textbf{病历生成 GenRM GRPO 训练}
+\begin{itemize}
+    \item 从医患对话自动生成结构化病历（开放式任务，无标准答案）；Qwen3.5-27B 与 SFT 版本 LLM-as-Judge 评分均不理想，
+    \item 设计生成式奖励模型评分维度，构建对应评测 prompt 与 rubric，以对齐人工评估标准；
+\end{itemize}
+
+% -------- 多模态评测 --------
+\textbf{医疗多模态大语言模型自动评测与错误分析}
+\begin{itemize}
+    \item 设计涵盖多模态理解质量、画像结合度、医学专业性与准确性、逻辑推理、医疗安全与合规、回答实用性与可执行度等维度的自动评测框架；基于 LLM-as-a-Judge（Claude）结构化打分，完成 bad case 回溯与多维度评测报告可视化。
+\end{itemize}
+
+% -------- 数据构建 --------
+\textbf{医疗垂域 SFT 数据构建与质检}
+\begin{itemize}
+    \item 整合开源病历和医院真实门诊数据，设计规则预筛+大模型双重质检双重流水线保障训练数据质量，基于deepseek-R1蒸馏Q-Cot-A,蒸馏强模型Q-A ,合成高质量慢思考和快思考SFT数据集。
+\end{itemize}
+
+% ====================== 个人总结 ======================
+\section{个人总结}
+
+\textbf{充足的实习时间:}可实习6个月\\[4pt]
+\textbf{技术技能}
+\begin{itemize}
+    \item \textbf{大模型训练框架:}verl、Swift、Megatron-LM、vLLM、sglang
+    \item \textbf{大模型评测与分析:}LLM-as-a-Judge、奖励函数设计、Rubric 设计、Bad Case 分析、Post-training Evaluation
+    \item \textbf{工程与实验:}Python、PyTorch、Linux
+\end{itemize}
+
+\end{document}
 
 % -------- 项目三（注释掉）：医考选择题 GenRM --------
 % \textbf{医考选择题生成式奖励模型 GRPO 训练（进行中）}
@@ -131,39 +166,3 @@
 % \end{itemize}
 
 % -------- 项目四：环境搭建 --------
-\textbf{Qwen3.5-27B 多机 GRPO + SFT 训练环境从零搭建}
-\begin{itemize}
-    \item \textbf{背景:}原业务依托华为昇腾集群 + 公司自研训练框架 + 自研基模；因自研基模效果不及预期，决策切换至 Qwen3.5-27B，但无现成环境，由本人从零完成 H200 多机集群 post-training 全套工具链部署（verl / Megatron-LM / vLLM / Ray）。
-    \item \textbf{关键工程问题:}解决多机部署中\textbf{多网卡 IP 解析错误、Ray 节点资源 race condition、shell 解析 Ray INFO 日志污染、Hydra struct mode 兼容、FlashInfer JIT 在 NFS 上并发竞争}等问题；针对 Qwen3.5 GDN 线性注意力不支持 THD packed sequence 的架构限制，确定 \texttt{use\_remove\_padding=False} + \texttt{use\_dynamic\_bsz=False} 的 BSHD 路径方案。
-    \item \textbf{SFT 环境与分析:}配置 Swift + H200 + Qwen3.5-27B 全量 SFT 环境；对 230 万条医学数据（48卡、约3天）SFT 后指令遵循能力（IFEval）下降问题进行分析，定位为思维链显著缩短、训练数据原为自研基模定制导致分布不对齐，提供数据质量改进建议。
-    \item \textbf{工程方法论:}梳理业务侧快速迭代模式：先以单业务小批量数据验证数据有效性，再合入全业务大版本（230 万条）进行正式训练；掌握三层 batch 设计、KL 加 loss vs 加 reward、低方差 KL 估计器（k3）、PPO clip-higher、reward manager 选型等核心配置与权衡。
-\end{itemize}
-
-% -------- 项目五：多模态评测 --------
-\textbf{医疗多模态大语言模型自动评测与错误分析}
-\begin{itemize}
-    \item 设计覆盖多维度理解、逻辑推理、医学正确性、安全性、回答有用性、格式规范等维度的自动评测框架，辅助大模型迭代中的回归与对比分析。
-    \item 基于 LLM-as-a-Judge 设计并优化评测 prompt、rubric 细化与子分标签；调用 Claude 等模型进行结构化打分，完成维度分析、bad case 回溯与评测报告可视化。
-    \item 针对医学场景常见错误类型（笼统回答、幻觉、证据缺失、图像利用不足、结构输出不规范等）构建错误分类视角，为模型迭代与 benchmark 设计提供依据。
-    \item \textbf{多模态 SFT 跟进:}参与多模态 SFT 数据梳理与分析（Swift + H200 + Qwen3.5-27B，冻结视觉编码器，约 2 万图文 QA 数据，16 卡 batchsize=16，约 10 小时），了解各业务数据分布（医考 / 诊疗助理 / 多轮对话等）及数据有效性验证流程。
-\end{itemize}
-
-% -------- 项目六：KIE Benchmark --------
-\textbf{医疗 KIE Benchmark 构建}
-\begin{itemize}
-    \item 参与医疗信息抽取场景下 benchmark 任务设计，覆盖分类、字段值抽取、关系判断与复杂结构输出等多种任务类型。
-\end{itemize}
-
-% ====================== 个人总结 ======================
-\section{个人总结}
-
-\textbf{充足的实习时间:}可实习6个月以上\\[4pt]
-\textbf{技术技能}
-\begin{itemize}
-    \item \textbf{大模型训练框架:}verl（GRPO/PPO 全流程）、Swift（SFT）、Megatron-LM、vLLM、Transformers
-    \item \textbf{大模型评测与分析:}LLM-as-a-Judge、奖励函数设计、Rubric 设计、Bad Case 分析、Post-training Evaluation
-    \item \textbf{医疗 AI:}Medical QA、病历质控、病历生成、KIE、多模态评测、结构化信息抽取
-    \item \textbf{工程与实验:}Python、PyTorch、Shell、Linux、多机 GPU 集群调试、Ray 集群编排
-\end{itemize}
-
-\end{document}
