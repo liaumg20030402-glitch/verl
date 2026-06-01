@@ -46,8 +46,8 @@ DISRM_MODEL_PATH=${DISRM_MODEL_PATH:-"${GRM_MODEL_PATH}"}
 export GRM_MODEL_NAME="${GRM_MODEL_NAME:-${GRM_MODEL_PATH}}"
 
 # reward model rollout 资源
-GEN_RM_TP=${GEN_RM_TP:-1}
-GRM_GPU_MEM=${GRM_GPU_MEM:-0.35}
+GEN_RM_TP=${GEN_RM_TP:-4}
+GRM_GPU_MEM=${GRM_GPU_MEM:-0.6}
 
 export CUDA_HOME=/usr/local/cuda-12.9
 export PATH=${CUDA_HOME}/bin:${PATH}
@@ -230,8 +230,8 @@ adv_estimator=grpo
 HF_MODEL_PATH=${HF_MODEL_PATH:-"/train21/medcog/permanent/leijiang19/pretrain_models/Qwen3.5-27B"}
 
 # ===== 本地 parquet 数据路径 =====
-train_path=${train_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/medexam_train_fast_verl.parquet"}
-test_path=${test_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/medexam_val_fast_verl.parquet"}
+train_path=${train_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_train_fast_verl.parquet"}
+test_path=${test_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_val_fast_verl.parquet"}
 
 
 BASE_OUT_DIR="/train21/medcog/permanent/jycai6/jmli27/"

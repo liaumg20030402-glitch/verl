@@ -230,8 +230,8 @@ adv_estimator=grpo
 HF_MODEL_PATH=${HF_MODEL_PATH:-"/train21/medcog/permanent/leijiang19/pretrain_models/Qwen3.5-27B"}
 
 # ===== 本地 parquet 数据路径 =====
-train_path=${train_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/medexam_train_fast_verl.parquet"}
-test_path=${test_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/medexam_val_fast_verl.parquet"}
+train_path=${train_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_train_fast_verl.parquet"}
+test_path=${test_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_val_fast_verl.parquet"}
 
 
 BASE_OUT_DIR="/train21/medcog/permanent/jycai6/jmli27/"
