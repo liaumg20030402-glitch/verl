@@ -189,7 +189,7 @@ GEN_TP=${GEN_TP:-8}    # vLLM rollout TP，独立于训练侧 TP
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 
 # ===== Reward mode 配置 =====
-# REWARD_MODE: default | rule | disrm | genrm | genrm_remote
+# REWARD_MODE: default | rule | disrm | genrm | genrm_remote | multi
 #   default: 不设 custom_reward_function，让 verl 按 parquet 里 data_source 字段
 #            自动路由到内置评分器（gsm8k / MATH / MATH-500 / codecontests / ...）。
 #            适用于跑 verl examples/data_preprocess/ 里官方预处理过的数据集。
@@ -199,12 +199,17 @@ ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 #   genrm:   generative reward model（verl 托管：内部起 GenRM server + router）
 #   genrm_remote: 外部 server 版 genrm（自己用 start_genrm_server.sh 起服务，
 #                 verl 只调用 post 到 GENRM_BASE_URL 的奖励函数；最适合单独调试 GenRM）
-REWARD_MODE=${REWARD_MODE:-genrm_remote}
+#   multi:   ⭐ 多任务联合训练（本脚本默认）。一个分发奖励函数按每行 data_source 路由：
+#            med-exam → 外部 GenRM（同 genrm_remote）；blzk / kie / zyzl-blzk → 本地规则。
+#            train/val 用合并后的多任务 parquet（见 process_data/merge_parquet.py），
+#            每行自带 data_source，verl 逐样本回调时把 data_source 传给分发函数。
+REWARD_MODE=${REWARD_MODE:-multi}
 REWARD_MANAGER_NAME=${REWARD_MANAGER_NAME:-dapo}
 
-# 自定义奖励函数路径（rule/genrm/genrm_remote 都用 REWARD_FN_PATH 这一个变量引用）
-REWARD_FN_PATH=${REWARD_FN_PATH:-"/train21/medcog/permanent/jycai6/jmli27/reward/reward_fn_medexam_genrm_remote.py"}
-REWARD_FN_NAME=${REWARD_FN_NAME:-compute_score_medexam_genrm_remote}
+# 自定义奖励函数路径（rule/genrm/genrm_remote/multi 都用 REWARD_FN_PATH 这一个变量引用）
+# multi 模式默认指向分发函数；单任务模式按需覆盖 REWARD_FN_PATH / REWARD_FN_NAME。
+REWARD_FN_PATH=${REWARD_FN_PATH:-"/train21/medcog/permanent/jycai6/jmli27/reward/reward_fn_multitask.py"}
+REWARD_FN_NAME=${REWARD_FN_NAME:-compute_score_multitask}
 
 
 # 奖励模型路径：genrm/disrm 模式会启用 reward_model
@@ -249,16 +254,52 @@ fi
 RUN_ID=${RUN_ID:-$(date +%Y%m%d_%H%M%S)}
 
 rollout_name="vllm"
-project_name='verl_grpo_qwen3_5_27b_blzk'
-exp_name="blzk_v3_${REWARD_MODE}"   # 不带时间戳：多次启动复用同一 CKPTS_DIR，触发 auto resume
+project_name='verl_grpo_qwen3_5_27b_multitask'
+# ⚠️ 从 SFT ckpt 起训：换了新 exp_name，确保 auto resume 不会误续到基座那次的 ckpt。
+#    （resume_mode=auto 是按 CKPTS_DIR=output/${project}/${exp} 找最新 ckpt 的）
+exp_name="multitask_sftinit_v1_${REWARD_MODE}"
 adv_estimator=grpo
 
-# ===== 本地模型路径 =====
-HF_MODEL_PATH=${HF_MODEL_PATH:-"/train21/medcog/permanent/leijiang19/pretrain_models/Qwen3.5-27B"}
+# ===== 初始 policy 模型路径 =====
+# RL 的 actor 初始权重 / rollout / reference 都来自这个路径。
+# 从 SFT ckpt 起训：指向 swift 全参 SFT 导出的 HF 格式 ckpt（含 config.json + *.safetensors + tokenizer*）。
+# ⚠️ 路径请按实际核对（下面是按截图转写，注意 OCR 可能有偏差）。
+# 基座模型（如需对比从头训）：/train21/medcog/permanent/leijiang19/pretrain_models/Qwen3.5-27B
+SFT_CKPT_PATH="/train21/medcog/permanent/jycai6/med_sft_train_swift/exps/qwen_27b_sft_med_1043_20260601/model_output/qwen_27b_sft_med_1043_20260529_epoch/v0-20260603-084935/checkpoint-1118-resave"
+HF_MODEL_PATH=${HF_MODEL_PATH:-"${SFT_CKPT_PATH}"}
 
-# ===== 本地 parquet 数据路径 =====
-train_path=${train_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/medexam/medexam_train_fast_verl.parquet"}
-test_path=${test_path:-"/train21/medcog/permanent/jycai6/jmli27/dataset/medexam/medexam_val_fast_verl.parquet"}
+# ===== 本地 parquet 数据路径（多任务：直接传文件列表，不合并）=====
+# verl 的 data.train_files / val_files 支持传文件列表，自动拼接后由 data.shuffle=True 全局打乱。
+# 每个 parquet 每行自带 data_source，reward_fn_multitask 据此分发打分。
+# ⭐ 想去掉某类任务：把对应行注释掉即可，无需重新合并数据。
+DATASET_ROOT=${DATASET_ROOT:-"/train21/medcog/permanent/jycai6/jmli27/dataset"}
+TRAIN_FILES=(
+    "${DATASET_ROOT}/medexam/medexam_train_verl.parquet"
+    "${DATASET_ROOT}/blzk/blzk_train_verl.parquet"
+    "${DATASET_ROOT}/kie/kie_train_verl.parquet"
+    "${DATASET_ROOT}/zyzl_blzk/zyzl_blzk_train_verl.parquet"
+)
+VAL_FILES=(
+    "${DATASET_ROOT}/medexam/medexam_val_verl.parquet"
+    "${DATASET_ROOT}/blzk/blzk_val_verl.parquet"
+    "${DATASET_ROOT}/kie/kie_val_verl.parquet"
+    "${DATASET_ROOT}/zyzl_blzk/zyzl_blzk_val_verl.parquet"
+)
+
+# 把 bash 数组拼成 Hydra list 字面量： ['a','b',...]（无空格、单引号包路径）
+join_hydra_list() {
+    local sep="" out="[" f
+    for f in "$@"; do
+        out+="${sep}'${f}'"
+        sep=","
+    done
+    printf '%s]' "${out}"
+}
+
+# 允许用环境变量 train_path/test_path 直接覆盖（单文件或自定义 Hydra list 都行）；
+# 否则由上面的 TRAIN_FILES / VAL_FILES 数组生成 list。
+train_path=${train_path:-$(join_hydra_list "${TRAIN_FILES[@]}")}
+test_path=${test_path:-$(join_hydra_list "${VAL_FILES[@]}")}
 
 
 BASE_OUT_DIR="/train21/medcog/permanent/jycai6/jmli27/"
@@ -270,8 +311,9 @@ mkdir -p "${CKPTS_DIR}" "${CKPTS_DIR}/logs"
 ############################# Parameter Arrays #############################
 
 DATA=(
-    data.train_files=${train_path}
-    data.val_files=${test_path}
+    # 加引号：train_path 可能是 ['a','b',...] 这种含 [ ] 的 Hydra list，避免被 bash 当 glob 展开
+    "data.train_files=${train_path}"
+    "data.val_files=${test_path}"
     # ⚠️ batch 整除性提示：
     # minimal_bsz = (Train_NNODES*8 / TP/PP/CP) * micro_per_gpu
     # NNODES=2 TP=4 → DP=4, minimal_bsz=4    train_batch × rollout.n % minimal_bsz == 0
@@ -397,7 +439,7 @@ ALGORITHM=(
     +algorithm.filter_groups.max_num_gen_batches=10
 )
 
-# Reward 参数（支持 5 种模式：default / rule / disrm / genrm / genrm_remote）
+# Reward 参数（支持 6 种模式：default / rule / disrm / genrm / genrm_remote / multi）
 REWARD=(
     reward.num_workers=8
     reward.reward_manager.name=${REWARD_MANAGER_NAME}
@@ -442,7 +484,7 @@ elif [[ "${REWARD_MODE}" == "disrm" ]]; then
     )
 elif [[ "${REWARD_MODE}" == "genrm_remote" ]]; then
     # ===== 外部 server 模式 =====
-    # GenRM 用 scripts/start_genrm_server.sh 起成独立 vLLM 服务，
+    # GenRM 用 scripts/start_genrm_server.sh 起成独立 sglang 服务，
     # verl 不管它的卡/生命周期，只调用一个会 post 到 GENRM_BASE_URL 的奖励函数。
     # 跑前确保：① start_genrm_server.sh 已起好；② `bash start_genrm_server.sh --test` curl 通；
     #           ③ 下面两个 env 指向它（GENRM_MODEL_NAME 要 = server 的 --served-model-name）。
@@ -456,16 +498,18 @@ elif [[ "${REWARD_MODE}" == "genrm_remote" ]]; then
         # ⭐ 地址/模型名走 reward_kwargs 下发（多机可达，不依赖环境变量能否传到 ray worker）
         +reward.custom_reward_function.reward_kwargs.grm_base_url=${GENRM_BASE_URL}
         +reward.custom_reward_function.reward_kwargs.grm_model_name=${GENRM_MODEL_NAME}
-        +reward.custom_reward_function.reward_kwargs.grm_temperature=0.0
+        # 复读主要受温度影响（实测 temp 0.6→0.7→0.8 复读递减，top_k 无明显差异），不加任何惩罚。
+        +reward.custom_reward_function.reward_kwargs.grm_temperature=0.8
         +reward.custom_reward_function.reward_kwargs.grm_top_p=1.0
-        # max_tokens 别给太大：越大判分越慢、reward 阶段越长 → 训练 GPU 空闲越久越易被杀。
-        # 裁判只需"想一点 + 吐 JSON 结论"，1024 约 ~165s；不够就精简 judge prompt 让它别长篇思考。
-        +reward.custom_reward_function.reward_kwargs.grm_max_tokens=3072
-        # ⭐ 集群按"训练 GPU 连续空闲 >5min(300s)"杀任务。一条卡住的请求最坏让训练空等
-        #   = grm_request_timeout × grm_max_retries，必须 < 300s → 这里 240×1=240s，安全；
-        #   且 240 > 正常最慢一次 judge(1024 token ~165s)，不会误杀正常请求。
+        +reward.custom_reward_function.reward_kwargs.grm_top_k=-1
+        # 开思考的复杂审核任务输出较长，max_tokens 给大些（8192）避免 JSON 被截断。
+        +reward.custom_reward_function.reward_kwargs.grm_max_tokens=8192
+        # 打分与 rollout 重叠（reward loop），判分耗时大多被生成时间盖住；timeout 仍设上限防卡死。
         +reward.custom_reward_function.reward_kwargs.grm_request_timeout=600
         +reward.custom_reward_function.reward_kwargs.grm_max_retries=1
+        # 裁判思考开关（默认开，见脚本上方 GRM_ENABLE_THINKING）；JSON 解析失败由奖励函数内
+        # json_repair 修复，修不了则 genrm_failed=1 软丢弃。
+        +reward.custom_reward_function.reward_kwargs.grm_enable_thinking=True
     )
 elif [[ "${REWARD_MODE}" == "genrm" ]]; then
     REWARD+=(
@@ -486,13 +530,51 @@ elif [[ "${REWARD_MODE}" == "genrm" ]]; then
         +reward.reward_model.rollout.engine_kwargs.vllm.gdn_prefill_backend=triton
         reward.custom_reward_function.path=${REWARD_FN_PATH}
         reward.custom_reward_function.name=${REWARD_FN_NAME}
-        +reward.custom_reward_function.reward_kwargs.grm_temperature=0.0
+        +reward.custom_reward_function.reward_kwargs.grm_temperature=0.6
+        +reward.custom_reward_function.reward_kwargs.grm_top_p=0.95
+        +reward.custom_reward_function.reward_kwargs.grm_max_tokens=8192
+    )
+elif [[ "${REWARD_MODE}" == "multi" ]]; then
+    # ===== 多任务联合训练（分发奖励函数）=====
+    # 一个 custom_reward_function（reward_fn_multitask.compute_score_multitask）按每行
+    # data_source 路由：med-exam → 外部 GenRM（同 genrm_remote，走下面的 grm_* 配置）；
+    # blzk / kie / zyzl-blzk → 本地规则评分（忽略 grm_* 配置）。
+    # 因此这里同时下发 genrm_remote 的全部 reward_kwargs：med-exam 用得到，规则任务用不到。
+    # 跑前提：med-exam 的外部 GenRM 已用 start_genrm_server.sh 起好并 curl 验证过。
+    export GENRM_BASE_URL=${GENRM_BASE_URL:-"http://100.85.97.73:8000"}
+    export GENRM_MODEL_NAME=${GENRM_MODEL_NAME:-"genrm_remote"}
+    REWARD+=(
+        # 不在集群内起 RM（med-exam 的 GenRM 在集群外），policy 用全部节点
+        reward.reward_model.enable=False
+        reward.custom_reward_function.path=${REWARD_FN_PATH}
+        reward.custom_reward_function.name=${REWARD_FN_NAME}
+        # med-exam 分支用：GenRM 地址 / 模型名 / 采样参数（经 reward_kwargs 下发，多机可达）
+        +reward.custom_reward_function.reward_kwargs.grm_base_url=${GENRM_BASE_URL}
+        +reward.custom_reward_function.reward_kwargs.grm_model_name=${GENRM_MODEL_NAME}
+        # 复读主要受温度影响（实测 temp 0.6→0.7→0.8 复读递减，top_k 无明显差异），不加任何惩罚。
+        +reward.custom_reward_function.reward_kwargs.grm_temperature=0.8
         +reward.custom_reward_function.reward_kwargs.grm_top_p=1.0
-        +reward.custom_reward_function.reward_kwargs.grm_max_tokens=1024
+        +reward.custom_reward_function.reward_kwargs.grm_top_k=-1
+        +reward.custom_reward_function.reward_kwargs.grm_max_tokens=8192
+        +reward.custom_reward_function.reward_kwargs.grm_request_timeout=600
+        +reward.custom_reward_function.reward_kwargs.grm_max_retries=1
+        # 裁判思考开关（默认开，见脚本上方 GRM_ENABLE_THINKING）；JSON 解析失败由奖励函数内
+        # json_repair 修复，修不了则 genrm_failed=1 软丢弃。
+        +reward.custom_reward_function.reward_kwargs.grm_enable_thinking=True
     )
 else
-    echo "Invalid REWARD_MODE=${REWARD_MODE}, expected one of: default|rule|disrm|genrm|genrm_remote"
+    echo "Invalid REWARD_MODE=${REWARD_MODE}, expected one of: default|rule|disrm|genrm|genrm_remote|multi"
     exit 1
+fi
+
+# ===== GenRM 调试落盘（排查裁判超长/JSON 解析失败）=====
+# 设了 GRM_DEBUG_DIR 才落盘：解析失败的样本会把裁判完整 raw 回复 + actor 答案 + 标准答案 +
+# token 数追加到 ${GRM_DEBUG_DIR}/genrm_debug_<host>_<pid>.jsonl，方便排查为什么超 8192。
+# 经 reward_kwargs 下发（多机可达，不依赖环境变量能否传到 ray reward worker）。排查完取消即可。
+GRM_DEBUG_DIR=${GRM_DEBUG_DIR:-"${CKPTS_DIR}/genrm_debug"}
+if [ -n "${GRM_DEBUG_DIR}" ] && [[ "${REWARD_MODE}" == "multi" || "${REWARD_MODE}" == "genrm_remote" || "${REWARD_MODE}" == "genrm" ]]; then
+    mkdir -p "${GRM_DEBUG_DIR}"
+    REWARD+=( +reward.custom_reward_function.reward_kwargs.grm_debug_dir=${GRM_DEBUG_DIR} )
 fi
 
 TRAINER=(

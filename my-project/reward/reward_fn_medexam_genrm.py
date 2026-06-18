@@ -188,7 +188,4 @@ async def compute_score_medexam_genrm(
         "score": score,
         "pred": pred,
         "judge_reason": reasoning,
-        # 透传样本元信息便于 case study / 分桶分析
-        "id": str(info.get("id", "")),
-        "hardness": str(info.get("hardness", "")),
     }

@@ -7,7 +7,7 @@ conda activate swift_rl_py312
 pip install torch torchvision torchaudio
 cd ~/pkgs
 unzip ms-swift-main.zip
-cd ms-swift-main
+cd ms-swift-main-20260317
 # 安装 swift 及其依赖项
 pip install -e .
 pip install -U "transformers>=5.3.0" "qwen_vl_utils>=0.0.14" peft liger-kernel

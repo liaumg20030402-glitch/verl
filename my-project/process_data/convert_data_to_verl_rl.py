@@ -1,11 +1,15 @@
 """
-数据转换脚本（medexam + blzk）
+数据转换脚本（medexam / blzk / kie / zyzl-blzk）
 将原始数据转换为 verl 强化学习训练所需的 parquet 格式。
 
+任务分两类：
+  - medexam：style=model，额外带 question 字段（convert_medexam_row）；
+  - 规则评分类（blzk / kie / zyzl-blzk）：结构一致、仅 data_source 不同，
+    走通用 convert_rule_row，新增同类任务只需在 RULE_TASK_DATA_SOURCE 登记。
 """
 
 from concurrent.futures import ProcessPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 
 import pandas as pd
@@ -16,32 +20,51 @@ from tqdm import tqdm
 WORKERS = 4
 VERIFY_AFTER_CONVERT = True
 
+# output_path 自动由 input_path 派生（同目录、文件名加 _verl.parquet 后缀），
+# 因此这里只需维护 task_type 和 input_path。
 TASK_CONFIGS = [
     {
-        "task_name": "medexam_train",
         "task_type": "med-exam",
         "input_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/medexam/medexam_train.parquet",
-        "output_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/medexam/medexam_train_verl.parquet",
     },
     {
-        "task_name": "medexam_val",
         "task_type": "med-exam",
         "input_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/medexam/medexam_val.parquet",
-        "output_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/medexam/medexam_val_verl.parquet",
     },
     {
-        "task_name": "blzk_train",
         "task_type": "blzk",
         "input_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_train.parquet",
-        "output_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_train_verl.parquet",
     },
     {
-        "task_name": "blzk_val",
         "task_type": "blzk",
         "input_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_val.parquet",
-        "output_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_val_verl.parquet",
+    },
+    {
+        "task_type": "kie",
+        "input_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/kie/kie_train.parquet",
+    },
+    {
+        "task_type": "kie",
+        "input_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/kie/kie_val.parquet",
+    },
+    {
+        "task_type": "zyzl-blzk",
+        "input_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/zyzl_blzk/zyzl_blzk_train.parquet",
+    },
+    {
+        "task_type": "zyzl-blzk",
+        "input_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/zyzl_blzk/zyzl_blzk_val.parquet",
     },
 ]
+
+
+def _derive_output_path(input_path: str) -> str:
+    """由 input_path 派生 output_path：同目录，文件名去掉原后缀后加 _verl.parquet。
+
+    例：.../medexam_train.parquet -> .../medexam_train_verl.parquet
+    """
+    p = PurePosixPath(input_path)
+    return str(p.with_name(f"{p.stem}_verl.parquet"))
 
 
 
@@ -113,9 +136,15 @@ def _build_prompt(raw_input: str) -> list[dict]:
     return prompt
 
 
-# -------------------- 两类任务转换逻辑 --------------------
+# -------------------- 任务转换逻辑 --------------------
+# task_type 直接作为 data_source 使用。规则评分类任务（blzk / kie / zyzl-blzk）结构
+# 完全一致，target 一律原样保留（清洗/格式识别交给各自的奖励函数）；新增同类任务
+# 只需把 task_type 登记到这里，并在 TASK_CONFIGS 增加配置。
+RULE_TASKS = {"blzk", "kie", "zyzl-blzk"}
+
+
 def convert_medexam_row(row: dict) -> dict | None:
-    """medexam 单条转换：直接使用原始 category/target。"""
+    """medexam 单条转换：style=model，额外带 question 字段。"""
     target = str(row.get("target", "") or "").strip()
     if not target:
         return None
@@ -134,23 +163,22 @@ def convert_medexam_row(row: dict) -> dict | None:
         "extra_info": {
             "id": str(row.get("id", "")),
             "category": raw_category,
-            "hardness": str(row.get("hardness", "")),
             "question": user_content,
             "target": target,
         },
     }
 
 
-def convert_blzk_row(row: dict) -> dict | None:
-    """blzk 单条转换：保留原始 target。"""
+def convert_rule_row(row: dict, data_source: str) -> dict | None:
+    """规则评分类任务（blzk / kie / zyzl-blzk）通用转换：原样保留 target。"""
     target = str(row.get("target", "") or "").strip()
     if not target:
         return None
 
     return {
-        "data_source": "med-blzk",
+        "data_source": data_source,
         "prompt": _build_prompt(row.get("input", "")),
-        "ability": "med-blzk",
+        "ability": data_source,
         "reward_model": {
             "style": "rule",
             "ground_truth": target,
@@ -158,25 +186,23 @@ def convert_blzk_row(row: dict) -> dict | None:
         "extra_info": {
             "id": str(row.get("id", "")),
             "category": str(row.get("category", "")),
-            "hardness": str(row.get("hardness", "")),
             "target": target,
             "type": str(row.get("type", "")),
-            "质控项类型": str(row.get("质控项类型", "")),
         },
     }
 
 
 def convert_row(row: dict, task_type: str) -> dict | None:
-    """根据任务类型路由到对应转换函数。"""
+    """根据任务类型路由到对应转换函数（task_type 即 data_source）。"""
     if task_type == "med-exam":
         return convert_medexam_row(row)
-    if task_type == "blzk":
-        return convert_blzk_row(row)
+    if task_type in RULE_TASKS:
+        return convert_rule_row(row, task_type)
     raise ValueError(f"未知 task_type: {task_type}")
 
 
 # -------------------- 批处理流程 --------------------
-def process_one_dataset(task_name: str, task_type: str, input_path: str, output_path: str, workers: int) -> None:
+def process_one_dataset(task_type: str, input_path: str, output_path: str, workers: int) -> None:
     """处理单个数据集并写出 parquet。"""
     df = _read_df(input_path)
     rows = df.to_dict("records")
@@ -188,14 +214,14 @@ def process_one_dataset(task_name: str, task_type: str, input_path: str, output_
                 tqdm(
                     executor.map(convert_row, rows, [task_type] * total, chunksize=200),
                     total=total,
-                    desc=f"转换 {task_name}",
+                    desc=f"转换 {task_type}",
                     unit="条",
                 )
             )
     else:
         results = [
             convert_row(row, task_type)
-            for row in tqdm(rows, desc=f"转换 {task_name}", unit="条")
+            for row in tqdm(rows, desc=f"转换 {task_type}", unit="条")
         ]
 
     records = [x for x in results if x is not None]
@@ -204,7 +230,7 @@ def process_one_dataset(task_name: str, task_type: str, input_path: str, output_
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(records).to_parquet(output_path, index=False)
 
-    print(f"\n[完成] {task_name}")
+    print(f"\n[完成] {task_type}")
     print(f"  输入: {input_path}")
     print(f"  输出: {output_path}")
     print(f"  保留: {len(records)} 条 | 跳过: {skipped} 条")
@@ -223,15 +249,15 @@ def verify_output(parquet_path: str, n: int = 2) -> None:
 def main() -> None:
     """按固定配置批量执行全部任务。"""
     for cfg in TASK_CONFIGS:
+        output_path = _derive_output_path(cfg["input_path"])
         process_one_dataset(
-            task_name=cfg["task_name"],
             task_type=cfg["task_type"],
             input_path=cfg["input_path"],
-            output_path=cfg["output_path"],
+            output_path=output_path,
             workers=WORKERS,
         )
         if VERIFY_AFTER_CONVERT:
-            verify_output(cfg["output_path"])
+            verify_output(output_path)
 
 
 if __name__ == "__main__":

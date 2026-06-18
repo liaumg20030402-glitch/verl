@@ -103,7 +103,4 @@ def compute_score_blzk_rule(
         "score": float(score),
         "pred": detail.get("pred", ""),
         "judge_reason": detail.get("reason", "unknown"),
-        # 透传样本元信息便于 case study / 分桶分析
-        "id": str(info.get("id", "")),
-        "hardness": str(info.get("hardness", "")),
     }

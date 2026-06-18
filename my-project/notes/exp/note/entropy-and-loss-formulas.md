@@ -95,7 +95,7 @@ actor_rollout_ref.actor.entropy_coeff=0.001  # β = 0.001
 |---|---|
 | `0` | 完全关闭 entropy bonus(你目前的设置)|
 | `0.001 ~ 0.005` | 温和奖励 entropy,RLHF 常见 |
-| `0.01` | DAPO 论文取值,较强 |
+| `0.01` | 较强 |
 | `> 0.05` | 过强,模型学不动 |
 | `< 0` | 反向,惩罚 entropy(罕用)|
 

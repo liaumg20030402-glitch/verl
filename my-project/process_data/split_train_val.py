@@ -32,21 +32,24 @@ DEFAULT_SEED = 42
 # 分层字段必须在 row 顶层或 extra_info 里有非空值,否则会被归到 "UNKNOWN" 单组
 DEFAULT_STRATIFY_BY: str | None = None
 
+blzk_in = "/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_train_verl.parquet"
+med_in = "/train21/medcog/permanent/jycai6/jmli27/dataset/medexam/medexam_train_verl.parquet"
+
 SPLIT_CONFIGS = [
-    {
+{
         "name": "blzk",
-        "input_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_train_verl.parquet",
-        "output_train_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_train_fast_verl.parquet",
-        "output_val_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/blzk/blzk_val_fast_verl.parquet",
+        "input_path": blzk_in,
+        "output_train_path": blzk_in.replace("_verl.parquet", "-train.parquet"),
+        "output_val_path": blzk_in.replace("_verl.parquet", "-val.parquet"),
         "train_val_ratio": DEFAULT_TRAIN_VAL_RATIO,
         "stratify_by": DEFAULT_STRATIFY_BY,
         "seed": DEFAULT_SEED,
     },
     {
         "name": "medexam",
-        "input_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/medexam/medexam_train_verl.parquet",
-        "output_train_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/medexam/medexam_train_fast_verl.parquet",
-        "output_val_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/medexam/medexam_val_fast_verl.parquet",
+        "input_path": med_in,
+        "output_train_path": med_in.replace("_verl.parquet", "-train.parquet"),
+        "output_val_path": med_in.replace("_verl.parquet", "-val.parquet"),
         "train_val_ratio": DEFAULT_TRAIN_VAL_RATIO,
         "stratify_by": DEFAULT_STRATIFY_BY,
         "seed": DEFAULT_SEED,
