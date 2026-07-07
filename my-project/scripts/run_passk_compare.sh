@@ -125,10 +125,13 @@ for entry in "${MODELS[@]}"; do
 done
 
 # ============================ 画对比图 ============================
+# FONT_PATH：可选，指向一个 CJK 字体 .ttf/.otf，解决中文图例显示成方块。
+FONT_PATH=${FONT_PATH:-""}
 echo "==================== 画对比图 ===================="
 python "${SCRIPT_DIR}/plot_passk.py" \
     --summaries "${OUT_ROOT}"/*/passk_summary.json \
-    --out "${OUT_ROOT}/passk_compare.png"
+    --out "${OUT_ROOT}/passk_compare.png" \
+    ${FONT_PATH:+--font_path "${FONT_PATH}"}
 
 echo "完成。结果目录：${OUT_ROOT}"
 echo "  - 每模型：${OUT_ROOT}/<model_id>/passk_summary.json (+ generations.jsonl / per_prompt.jsonl)"

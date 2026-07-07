@@ -1,11 +1,13 @@
 """
-数据转换脚本（medexam / blzk / kie / zyzl-blzk）
+数据转换脚本（medexam / blsc / blzk / kie / zyzl-blzk）
 将原始数据转换为 verl 强化学习训练所需的 parquet 格式。
 
-任务分两类：
-  - medexam：style=model，额外带 question 字段（convert_medexam_row）；
+任务分三类：
+  - medexam：style=model（GenRM 打分），额外带 question 字段（convert_medexam_row）；
+  - blsc（病历生成）：style=model（外部 GenRM 审核，**无 ground_truth**），输入是 messages 格式，
+    actor 据医患对话生成病历文书，医患对话存进 extra_info.dialogue 供 blsc.md 审核（convert_blsc_row）；
   - 规则评分类（blzk / kie / zyzl-blzk）：结构一致、仅 data_source 不同，
-    走通用 convert_rule_row，新增同类任务只需在 RULE_TASK_DATA_SOURCE 登记。
+    走通用 convert_rule_row，新增同类任务只需在 RULE_TASKS 登记。
 """
 
 from concurrent.futures import ProcessPoolExecutor
@@ -30,6 +32,14 @@ TASK_CONFIGS = [
     {
         "task_type": "med-exam",
         "input_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/medexam/medexam_val.parquet",
+    },
+    {
+        "task_type": "blsc",
+        "input_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/blsc/blsc_train.jsonl",
+    },
+    {
+        "task_type": "blsc",
+        "input_path": "/train21/medcog/permanent/jycai6/jmli27/dataset/blsc/blsc_val.jsonl",
     },
     {
         "task_type": "blzk",
@@ -140,7 +150,7 @@ def _build_prompt(raw_input: str) -> list[dict]:
 # task_type 直接作为 data_source 使用。规则评分类任务（blzk / kie / zyzl-blzk）结构
 # 完全一致，target 一律原样保留（清洗/格式识别交给各自的奖励函数）；新增同类任务
 # 只需把 task_type 登记到这里，并在 TASK_CONFIGS 增加配置。
-RULE_TASKS = {"blzk", "kie", "zyzl-blzk"}
+RULE_TASKS = {"blzk", "kie-science", "zyzl-blzk"}
 
 
 def convert_medexam_row(row: dict) -> dict | None:
@@ -165,6 +175,50 @@ def convert_medexam_row(row: dict) -> dict | None:
             "category": raw_category,
             "question": user_content,
             "target": target,
+        },
+    }
+
+
+def convert_blsc_row(row: dict) -> dict | None:
+    """blsc 病历生成单条转换（输入为 messages 格式：{"messages":[...], "loss":...}）。
+
+    actor 任务：据【医患对话】生成【病历文书】。因此 prompt 取数据里的 system + user 两轮；
+    数据里的 assistant 是参考病历，**丢弃**（blsc 无 ground_truth，靠 GenRM 审核打分）。
+    user 内容（含医患对话）原样存进 extra_info.dialogue，供奖励函数填到 blsc.md 的 {aaa}。
+    """
+    messages = row.get("messages")
+    if messages is None:
+        return None
+
+    system_content, user_content = "", ""
+    for m in list(messages):
+        if not isinstance(m, dict):
+            continue
+        role = str(m.get("role", ""))
+        content = str(m.get("content", "") or "")
+        if role == "system" and not system_content:
+            system_content = content
+        elif role == "user" and not user_content:
+            user_content = content
+    if not user_content:
+        return None
+
+    prompt = []
+    if system_content:
+        prompt.append({"role": "system", "content": system_content})
+    prompt.append({"role": "user", "content": user_content})
+
+    return {
+        "data_source": "blsc",
+        "prompt": prompt,
+        "ability": "blsc",
+        "reward_model": {
+            "style": "model",     # 外部 GenRM 审核打分
+            "ground_truth": "",   # blsc 无 GT
+        },
+        "extra_info": {
+            "id": str(row.get("id", "")),
+            "dialogue": user_content,   # 供 blsc.md {aaa}=医患对话
         },
     }
 
@@ -196,6 +250,8 @@ def convert_row(row: dict, task_type: str) -> dict | None:
     """根据任务类型路由到对应转换函数（task_type 即 data_source）。"""
     if task_type == "med-exam":
         return convert_medexam_row(row)
+    if task_type == "blsc":
+        return convert_blsc_row(row)
     if task_type in RULE_TASKS:
         return convert_rule_row(row, task_type)
     raise ValueError(f"未知 task_type: {task_type}")

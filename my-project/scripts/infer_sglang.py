@@ -119,6 +119,14 @@ def extract_thinking_and_prediction(response: str) -> tuple[str | None, str]:
     return thinking, prediction
 
 
+def _finish_type(meta: dict) -> str:
+    """SGLang meta_info.finish_reason 可能是 dict({'type':'length'/'stop'}) 或字符串，统一成字符串。"""
+    fr = meta.get("finish_reason") if isinstance(meta, dict) else None
+    if isinstance(fr, dict):
+        return str(fr.get("type", ""))
+    return str(fr or "")
+
+
 def get_last_user_message(messages: list) -> str:
     """提取 messages 中最后一条用户消息"""
     for msg in reversed(messages):
@@ -209,8 +217,13 @@ def run_inference(
             if local_idx in valid_indices:
                 out = next(out_iter)
                 result["response"] = out["text"]
+                meta = out.get("meta_info", {}) if isinstance(out, dict) else {}
+                result["finish_reason"] = _finish_type(meta)
+                result["completion_tokens"] = int(meta.get("completion_tokens", 0) or 0)
             else:
                 result["response"] = None
+                result["finish_reason"] = ""
+                result["completion_tokens"] = 0
             results.append(result)
 
         done = min(start + batch_size, total)
@@ -318,11 +331,16 @@ def main():
                 response = item.get("response", "")
                 thinking, prediction = extract_thinking_and_prediction(response)
 
+                finish_reason = item.get("finish_reason", "")
                 output_records.append({
                     "sample_id": sample_id,
                     "query": query,
                     "thinking": thinking,
-                    "prediction": prediction
+                    "prediction": prediction,
+                    "finish_reason": finish_reason,
+                    "completion_tokens": item.get("completion_tokens", 0),
+                    "truncated": finish_reason == "length",       # 顶满 max_new_tokens 被截断
+                    "no_think_close": thinking is None,           # 没解析到 </think>（思考没闭合）
                 })
 
             # 创建输出目录并保存结果

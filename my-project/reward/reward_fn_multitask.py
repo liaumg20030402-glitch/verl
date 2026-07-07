@@ -6,12 +6,13 @@ verl 的 custom_reward_function 对**每条样本**调用一次，并把该行 p
 
 本项目路由：
   - med-exam   → reward_fn_medexam_genrm_remote.compute_score_medexam_genrm_remote（async，外部 GenRM）
+  - blsc       → reward_fn_blsc_genrm_remote.compute_score_blsc_genrm_remote（async，外部 GenRM，无 GT）
   - blzk       → reward_fn_blzk_rule.compute_score_blzk_rule
   - kie-science        → reward_fn_kie_rule.compute_score_kie_rule
   - zyzl-blzk  → reward_fn_zyzl_blzk_rule.compute_score_zyzl_blzk_rule
 
 ⚠️ 两个关键点：
-  1) 本函数是 async：med-exam 走异步 HTTP 打分需要 await；rule 任务是同步函数，
+  1) 本函数是 async：med-exam / blsc 走异步 HTTP 打分需要 await；rule 任务是同步函数，
      在 async 里直接调用即可（不 await）。verl 会自动 await 协程型 reward 函数。
   2) **统一输出键 schema**：verl 的 dapo/naive reward manager 会把每条样本返回的
      额外字段汇总成 reward_extra_info（按键聚合成 list），要求一个 batch 内各样本
@@ -29,6 +30,7 @@ if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
 from reward_fn_medexam_genrm_remote import compute_score_medexam_genrm_remote  # noqa: E402
+from reward_fn_blsc_genrm_remote import compute_score_blsc_genrm_remote  # noqa: E402
 from reward_fn_blzk_rule import compute_score_blzk_rule  # noqa: E402
 from reward_fn_kie_rule import compute_score_kie_rule  # noqa: E402
 from reward_fn_zyzl_blzk_rule import compute_score_zyzl_blzk_rule  # noqa: E402
@@ -77,6 +79,11 @@ async def compute_score_multitask(
         # 异步：外部 GenRM 打分。reward_kwargs（grm_base_url / grm_model_name / ...）
         # 经 **kwargs 透传；verl 注入的 reward_router_address 也在 kwargs 里。
         result = await compute_score_medexam_genrm_remote(
+            data_source, solution_str, ground_truth, extra_info, **kwargs
+        )
+    elif ds == "blsc":
+        # 异步：外部 GenRM 审核病历（无 GT）。与 med-exam 共用同一套 grm_* reward_kwargs。
+        result = await compute_score_blsc_genrm_remote(
             data_source, solution_str, ground_truth, extra_info, **kwargs
         )
     elif ds in _RULE_DISPATCH:

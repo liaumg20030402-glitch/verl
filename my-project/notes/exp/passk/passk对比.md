@@ -1,4 +1,4 @@
-blzk 无锡集，N=64, TEMPERATURE:-0.7, TOP_P:-1.0, TOP_K:--1
+blzk 无锡集，519条，N=64, TEMPERATURE:-0.7, TOP_P:-1.0, TOP_K:--1
 
 
 | model | p@1 | p@2 | p@4 | p@8 | p@16 | p@32 | p@64 |

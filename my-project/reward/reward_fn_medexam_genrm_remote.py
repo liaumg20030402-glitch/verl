@@ -77,30 +77,40 @@ def _sanitize_judge_response(text: str) -> str:
 
 
 def _loads_or_repair(clean: str):
-    """先严格 json.loads；失败再用 json_repair 尝试修复后解析。都失败返回 None。"""
+    """先严格 json.loads；失败再用 json_repair 修复。
+
+    返回 (obj, repaired_str)：
+      - obj：解析出的对象（dict/list...），都失败为 None；
+      - repaired_str：json_repair 修复**后**的字符串（无需修复则等于 clean），落盘排查用。
+    """
     if not clean:
-        return None
+        return None, ""
     try:
-        return json.loads(clean)
+        return json.loads(clean), clean
     except Exception:
         pass
     if json_repair is not None:
         try:
-            return json_repair.loads(clean)
+            repaired = json_repair.repair_json(clean)  # 总是返回字符串（尽力修复）
+            try:
+                obj = json.loads(repaired) if repaired else None
+            except Exception:
+                obj = None
+            return obj, repaired
         except Exception:
-            return None
-    return None
+            return None, clean
+    return None, clean
 
 
 def _parse_judge_fields(text: str) -> tuple[str, str, float, bool, str]:
     """从裁判模型回复中解析 extracted_answer / reasoning / score，并返回 parsed_ok 和 clean。
 
-    parsed_ok=True 仅当 sanitize 后能解析出 dict（含 json_repair 修复成功）。
+    parsed_ok=True 仅当能解析出 dict（含 json_repair 修复成功）。
     解析失败（json_repair 也修不了）→ parsed_ok=False，上层据此标 genrm_failed=1 软丢弃。
-    clean = sanitize 后（去 </think>/围栏、json_repair 修复前）的文本，失败时回传用于定位原因。
+    clean = json_repair **修复后**的文本（无需修复则为 sanitize 结果），失败时回传用于定位原因。
     """
-    clean = _sanitize_judge_response(text)
-    obj = _loads_or_repair(clean)
+    sanitized = _sanitize_judge_response(text)
+    obj, clean = _loads_or_repair(sanitized)
     if isinstance(obj, dict):
         extracted = str(obj.get("extracted_answer", "") or "")
         reasoning = str(obj.get("reasoning", "") or "")
@@ -228,6 +238,21 @@ async def compute_score_medexam_genrm_remote(
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": enable_thinking},
     }
+    # 防复读/防崩惩罚项（仅在非中性值时下发 → 不设就和原来完全一致；server 不支持的键会报错暴露）。
+    # 实测（temp 0.7，server 路径）：presence_penalty 最有效，repetition_penalty 轻微叠加，
+    # frequency_penalty 会伤 JSON 高频标点导致乱码+反而更长（务必保持 0）。
+    min_p = float(os.environ.get("GRM_MIN_P", kwargs.get("grm_min_p", 0.0)))
+    repetition_penalty = float(os.environ.get("GRM_REPETITION_PENALTY", kwargs.get("grm_repetition_penalty", 1.0)))
+    presence_penalty = float(os.environ.get("GRM_PRESENCE_PENALTY", kwargs.get("grm_presence_penalty", 0.0)))
+    frequency_penalty = float(os.environ.get("GRM_FREQUENCY_PENALTY", kwargs.get("grm_frequency_penalty", 0.0)))
+    if min_p > 0:
+        payload["min_p"] = min_p
+    if repetition_penalty != 1.0:
+        payload["repetition_penalty"] = repetition_penalty
+    if presence_penalty != 0.0:
+        payload["presence_penalty"] = presence_penalty
+    if frequency_penalty != 0.0:
+        payload["frequency_penalty"] = frequency_penalty
     request_timeout = float(kwargs.get("grm_request_timeout", 300.0))
     # 最坏空等 = request_timeout × max_retries，必须 < 集群 idle-kill 阈值(5min)。
     max_retries = int(kwargs.get("grm_max_retries", 2))
@@ -285,7 +310,7 @@ async def compute_score_medexam_genrm_remote(
             "ground_truth": gt,
             "model_answer": clean_solution,   # 喂给裁判的 actor 答案（看是不是太长导致裁判想很久）
             "judge_resp_raw": judge_resp,     # 裁判原始 content（完整，不截断）
-            "clean": clean,                   # sanitize 后、json_repair 前
+            "clean": clean,                   # json_repair 后
         },
         kwargs,
     )

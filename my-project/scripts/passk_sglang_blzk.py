@@ -46,7 +46,7 @@ import argparse
 import importlib.util
 import json
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import numpy as np
 import pandas as pd
@@ -110,6 +110,63 @@ def majority_vote_correct(preds: list[str], scores: list[float]) -> float:
         if p == winner:
             return 1.0 if s >= 0.5 else 0.0
     return 0.0
+
+
+def normalize_label(x) -> str:
+    """规范化为 '合格'/'不合格'；其它（含解析失败的空串）归为 '其它'。"""
+    s = str(x or "").strip().replace('"', "").replace("“", "").replace("”", "")
+    if s == "合格":
+        return "合格"
+    if s == "不合格":
+        return "不合格"
+    return "其它"
+
+
+def majority_label(preds) -> str:
+    """N 条预测的多数投票决策（maj@N）；只在有效标签里投票，全无效则 '其它'。"""
+    valid = [normalize_label(p) for p in preds]
+    valid = [p for p in valid if p in ("合格", "不合格")]
+    if not valid:
+        return "其它"
+    return Counter(valid).most_common(1)[0][0]
+
+
+def binary_prf(items, qi2gt, positive: str = "不合格") -> dict:
+    """每题用 maj@N 决策 vs 真标签，建混淆矩阵，算 positive 类的 precision/recall/F1 + 整体 accuracy。
+
+    - 决策：N 条预测的多数投票（majority_label）。
+    - 无效预测('其它')视为'非 positive'（= 没把它判成 positive，对召回是漏检 FN，不会虚增 FP）。
+    - 真标签非 合格/不合格 的题跳过（invalid_gt）。
+    """
+    tp = fp = fn = tn = skipped = 0
+    for it in items:
+        true = normalize_label(qi2gt.get(it["qi"]))
+        if true not in ("合格", "不合格"):
+            skipped += 1
+            continue
+        pred_pos = (majority_label(it["preds"]) == positive)
+        true_pos = (true == positive)
+        if true_pos and pred_pos:
+            tp += 1
+        elif (not true_pos) and pred_pos:
+            fp += 1
+        elif true_pos and (not pred_pos):
+            fn += 1
+        else:
+            tn += 1
+    prec = tp / (tp + fp) if (tp + fp) else 0.0
+    rec = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0
+    n_used = tp + fp + fn + tn
+    acc = (tp + tn) / n_used if n_used else 0.0
+    return {
+        "positive": positive,
+        "tp": tp, "fp": fp, "fn": fn, "tn": tn, "skipped(invalid_gt)": skipped,
+        "accuracy(maj@n)": acc,
+        f"precision({positive})": prec,
+        f"recall({positive})": rec,
+        f"f1({positive})": f1,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -294,14 +351,17 @@ def main():
             d["scores"].append(float(r.get("score", 0.0)))
             d["preds"].append(str(r.get("pred", "")))
 
+    # 真标签映射：qi -> ground_truth（用于 precision/recall 的混淆矩阵）
+    qi2gt = {i: rows[i]["reward_model"]["ground_truth"] for i in range(len(rows))}
+
     # ---------- 6. 算无偏 pass@k，按 data_source 汇总 ----------
-    # ds -> list of per-prompt (n, c, scores, preds)
+    # ds -> list of per-prompt (qi, n, c, scores, preds)
     by_ds = defaultdict(list)
     for qi, d in per_q.items():
         scores = d["scores"]
         n_q = len(scores)
         c_q = int(sum(1 for s in scores if s >= 0.5))
-        by_ds[d["ds"]].append({"n": n_q, "c": c_q, "scores": scores, "preds": d["preds"]})
+        by_ds[d["ds"]].append({"qi": qi, "n": n_q, "c": c_q, "scores": scores, "preds": d["preds"]})
 
     per_prompt_path = os.path.join(args.out_dir, "per_prompt.jsonl")
     with open(per_prompt_path, "w", encoding="utf-8") as fpp:
@@ -327,13 +387,30 @@ def main():
         metrics["maj@n"] = float(np.nanmean(
             [majority_vote_correct(it["preds"], it["scores"]) for it in items]))
 
+        # format_valid_rate：每题 N 条里能解析出 合格/不合格 的比例，再对题平均。
+        # 它解释了下面两个 maj 口径的差距：base 格式合规差 → 含无效投票的 maj@n 被拖低。
+        metrics["format_valid_rate"] = float(np.mean([
+            sum(1 for p in it["preds"] if normalize_label(p) in ("合格", "不合格")) / it["n"]
+            for it in items]))
+
+        # 分类指标：以 maj@N 决策建混淆矩阵，算「不合格」的 precision/recall/F1（+整体 acc）
+        prf = binary_prf(items, qi2gt, positive="不合格")
+        metrics["classification"] = prf
+
         summary[ds] = metrics
         print(f"\n[data_source = {ds}]  题数={n_prompts}  每题采样={args.n}")
-        print(f"  pass@1 (平均准确率)        = {metrics['pass@1(mean_acc)']:.4f}")
+        print(f"  pass@1 (平均准确率)            = {metrics['pass@1(mean_acc)']:.4f}")
         for k in k_list:
-            print(f"  pass@{k:<3d} (无偏)            = {metrics[f'pass@{k}']:.4f}")
-        print(f"  solve_rate (>=1 correct)   = {metrics['solve_rate(>=1 correct)']:.4f}")
-        print(f"  maj@n (全样本多数投票)      = {metrics['maj@n']:.4f}")
+            print(f"  pass@{k:<3d} (无偏)                = {metrics[f'pass@{k}']:.4f}")
+        print(f"  solve_rate (>=1 correct)       = {metrics['solve_rate(>=1 correct)']:.4f}")
+        print(f"  format_valid_rate              = {metrics['format_valid_rate']:.4f}")
+        print(f"  maj@n (含无效输出投票)         = {metrics['maj@n']:.4f}")
+        print(f"  --- 分类（maj@N 决策, 仅有效标签投票, 正类=不合格, 跳过无效真标签 {prf['skipped(invalid_gt)']} 题）---")
+        print(f"  accuracy(maj@n, 仅有效投票)    = {prf['accuracy(maj@n)']:.4f}")
+        print(f"  precision(不合格)              = {prf['precision(不合格)']:.4f}")
+        print(f"  recall(不合格)                 = {prf['recall(不合格)']:.4f}")
+        print(f"  f1(不合格)                     = {prf['f1(不合格)']:.4f}")
+        print(f"  混淆: TP={prf['tp']} FP={prf['fp']} FN={prf['fn']} TN={prf['tn']}")
 
     summary_path = os.path.join(args.out_dir, "passk_summary.json")
     model_id = args.model_id or os.path.basename(os.path.normpath(args.out_dir))

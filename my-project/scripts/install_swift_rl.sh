@@ -12,6 +12,10 @@ cd ms-swift-main-20260317
 pip install -e .
 pip install -U "transformers>=5.3.0" "qwen_vl_utils>=0.0.14" peft liger-kernel
 
+export HOME=/home3/medcog/jycai6
+export PIP_CONFIG_FILE=/home3/medcog/jycai6/.pip/pip.conf
+export CONDARC=/home3/medcog/jycai6/.condarc
+
 # 2. 配置 CUDA 和编译环境变量
 export CUDA_HOME=/usr/local/cuda-12.9
 export PATH=${CUDA_HOME}/bin:${PATH}

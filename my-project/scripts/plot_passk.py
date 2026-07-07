@@ -25,6 +25,29 @@ def _k_of(metric_key: str):
     return int(m.group(1)) if m else None
 
 
+def _isnan(v) -> bool:
+    return isinstance(v, float) and v != v
+
+
+def _disp(s: str) -> str:
+    """把 model_id 转成纯 ASCII 显示（系统无 CJK 字体时避免方块）。卡→gpu，其余非 ASCII 丢弃。"""
+    s = str(s).replace("卡", "gpu")
+    out = s.encode("ascii", "ignore").decode()
+    return out or s
+
+
+def _get_cls(metrics: dict):
+    """从单模型某 data_source 的 metrics 里取分类指标：(acc, precision, recall, f1, maj@n, fmt_valid)。"""
+    cls = metrics.get("classification", {}) or {}
+    prec = next((v for k, v in cls.items() if k.startswith("precision")), float("nan"))
+    rec = next((v for k, v in cls.items() if k.startswith("recall")), float("nan"))
+    f1 = next((v for k, v in cls.items() if k.startswith("f1")), float("nan"))
+    acc = cls.get("accuracy(maj@n)", float("nan"))
+    majn = metrics.get("maj@n", float("nan"))
+    fmt = metrics.get("format_valid_rate", float("nan"))
+    return acc, prec, rec, f1, majn, fmt
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--summaries", nargs="+", required=True,
@@ -48,9 +71,13 @@ def main():
         mid = obj.get("model_id") or os.path.basename(os.path.dirname(p))
         runs[mid] = obj["summary"]
 
-    # base 排最前，其余按名字
+    # base 排最前；其余按「自然排序」：方法名分组 + step 按数字升序（step50→step100→step137），
+    # 而不是字符串序（否则 step100 会排在 step50 前面）。
+    def _natkey(s: str):
+        return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s.lower())]
+
     def order_key(mid):
-        return (0 if mid.lower().startswith("base") else 1, mid)
+        return (0 if mid.lower().startswith("base") else 1, _natkey(mid))
     model_ids = sorted(runs.keys(), key=order_key)
 
     # 收集所有 data_source
@@ -108,7 +135,7 @@ def main():
             for mid in model_ids:
                 metrics = runs[mid].get(ds, {})
                 ys = [metrics.get(f"pass@{k}", float("nan")) for k in ks]
-                plt.plot(ks, ys, marker="o", label=mid)
+                plt.plot(ks, ys, marker="o", label=_disp(mid))
             plt.xscale("log", base=2)
             plt.xticks(ks, [str(k) for k in ks])
             plt.xlabel("k (samples)")
@@ -121,6 +148,84 @@ def main():
             plt.savefig(fig_path, dpi=150)
             plt.close()
             print(f"[save] 图 -> {fig_path}")
+
+            # 放大版：去掉 base（它把 y 轴拉太宽），y 轴自动贴合 RL 模型，差别才看得清
+            rl_ids = [mid for mid in model_ids if not mid.lower().startswith("base")]
+            zoom_vals = [runs[mid].get(ds, {}).get(f"pass@{k}", float("nan"))
+                         for mid in rl_ids for k in ks]
+            zoom_vals = [v for v in zoom_vals if not _isnan(v)]
+            if len(rl_ids) >= 2 and zoom_vals:
+                plt.figure(figsize=(8, 5))
+                for mid in rl_ids:
+                    metrics = runs[mid].get(ds, {})
+                    ys = [metrics.get(f"pass@{k}", float("nan")) for k in ks]
+                    plt.plot(ks, ys, marker="o", label=_disp(mid))
+                lo, hi = min(zoom_vals), max(zoom_vals)
+                pad = max((hi - lo) * 0.08, 0.003)
+                plt.ylim(lo - pad, hi + pad)
+                plt.xscale("log", base=2)
+                plt.xticks(ks, [str(k) for k in ks])
+                plt.xlabel("k (samples)")
+                plt.ylabel("Pass@k (unbiased)")
+                plt.title(f"Unbiased Pass@k (RL only, zoomed) — {ds}")
+                plt.grid(True, alpha=0.3)
+                plt.legend(fontsize=8)
+                plt.tight_layout()
+                zoom_fig = f"{out_base}_{ds}_zoom{out_ext}"
+                plt.savefig(zoom_fig, dpi=150)
+                plt.close()
+                print(f"[save] 放大图 -> {zoom_fig}")
+
+        # -------- 分类指标（不合格 precision/recall/F1）表 + 柱状图 --------
+        cls_data = [(mid, *_get_cls(runs[mid].get(ds, {}))) for mid in model_ids]
+        if any(not _isnan(r[2]) for r in cls_data):  # 至少一个模型有 precision 才输出
+            print(f"\n--------- 分类指标（maj@N 决策, 正类=不合格） data_source = {ds} ---------")
+            cols = ["acc", "precision", "recall", "f1", "maj@n", "fmt_valid"]
+            hdr = "model".ljust(22) + "".join(c.rjust(11) for c in cols)
+            print(hdr)
+            print("-" * len(hdr))
+            cls_csv = []
+            for mid, acc, prec, rec, f1, majn, fmt in cls_data:
+                vals = [acc, prec, rec, f1, majn, fmt]
+                print(mid.ljust(22) + "".join(f"{v:11.4f}" for v in vals))
+                cls_csv.append([mid] + vals)
+
+            cls_csv_path = f"{out_base}_{ds}_clf.csv"
+            with open(cls_csv_path, "w", newline="", encoding="utf-8") as fc:
+                w = csv.writer(fc)
+                w.writerow(["model", "accuracy", "precision(不合格)", "recall(不合格)",
+                            "f1(不合格)", "maj@n", "format_valid_rate"])
+                w.writerows(cls_csv)
+            print(f"[save] 分类表 -> {cls_csv_path}")
+
+            if have_mpl:
+                # precision / recall / f1 各画一张折线图（y 轴按数据范围放大，差别才看得清）。
+                # 图内全用 ASCII，避免无 CJK 字体时显示成方块；NG = 不合格(buhege) 正类。
+                labels = [_disp(r[0]) for r in cls_data]
+                xs = list(range(len(labels)))
+                for col_idx, name in ((2, "precision"), (3, "recall"), (4, "f1")):
+                    ys = [r[col_idx] for r in cls_data]
+                    valid = [v for v in ys if not _isnan(v)]
+                    if not valid:
+                        continue
+                    plt.figure(figsize=(max(7, 1.4 * len(labels)), 5))
+                    plt.plot(xs, ys, marker="o")
+                    lo, hi = min(valid), max(valid)
+                    pad = max((hi - lo) * 0.15, 0.01)  # 留边距，把差别放大
+                    plt.ylim(max(0.0, lo - pad), min(1.0, hi + pad))
+                    plt.xticks(xs, labels, rotation=30, ha="right")
+                    plt.ylabel(name)
+                    plt.title(f"{name} of NG (buhege) class, maj@N — {ds}")
+                    plt.grid(True, alpha=0.3)
+                    for x, v in zip(xs, ys):  # 点上标数值，近距离也能读数
+                        if not _isnan(v):
+                            plt.annotate(f"{v:.3f}", (x, v), textcoords="offset points",
+                                         xytext=(0, 5), ha="center", fontsize=8)
+                    plt.tight_layout()
+                    fig_p = f"{out_base}_{ds}_{name}{out_ext}"
+                    plt.savefig(fig_p, dpi=150)
+                    plt.close()
+                    print(f"[save] {name} 图 -> {fig_p}")
 
 
 if __name__ == "__main__":

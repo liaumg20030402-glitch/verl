@@ -490,6 +490,13 @@ elif [[ "${REWARD_MODE}" == "genrm_remote" ]]; then
     #           ③ 下面两个 env 指向它（GENRM_MODEL_NAME 要 = server 的 --served-model-name）。
     export GENRM_BASE_URL=${GENRM_BASE_URL:-"http://100.85.97.73:8000"}
     export GENRM_MODEL_NAME=${GENRM_MODEL_NAME:-"genrm_remote"}
+    # 防复读惩罚（env 可覆盖；中性值=不下发该键，server 不支持的键会报错暴露）。
+    # 实测（temp 0.7，server 路径，1596 样本）：presence_penalty 最有效（0→71、1.5→16 截断），
+    #   repetition_penalty=1.1 轻微叠加（→14），frequency_penalty 反而伤 JSON 标点导致乱码+更长（保持 0）。
+    GRM_MIN_P=${GRM_MIN_P:-0.0}
+    GRM_REPETITION_PENALTY=${GRM_REPETITION_PENALTY:-1.1}
+    GRM_PRESENCE_PENALTY=${GRM_PRESENCE_PENALTY:-1.5}
+    GRM_FREQUENCY_PENALTY=${GRM_FREQUENCY_PENALTY:-0.0}
     REWARD+=(
         # 不让 verl 在集群内起 RM（GenRM 在集群外），policy 用全部节点
         reward.reward_model.enable=False
@@ -498,10 +505,15 @@ elif [[ "${REWARD_MODE}" == "genrm_remote" ]]; then
         # ⭐ 地址/模型名走 reward_kwargs 下发（多机可达，不依赖环境变量能否传到 ray worker）
         +reward.custom_reward_function.reward_kwargs.grm_base_url=${GENRM_BASE_URL}
         +reward.custom_reward_function.reward_kwargs.grm_model_name=${GENRM_MODEL_NAME}
-        # 复读主要受温度影响（实测 temp 0.6→0.7→0.8 复读递减，top_k 无明显差异），不加任何惩罚。
+        # 复读主要受温度影响（实测 temp 0.6→0.7→0.8 复读递减，top_k 无明显差异）+ presence/repetition 惩罚兜底。
         +reward.custom_reward_function.reward_kwargs.grm_temperature=0.8
         +reward.custom_reward_function.reward_kwargs.grm_top_p=1.0
         +reward.custom_reward_function.reward_kwargs.grm_top_k=-1
+        # 防复读惩罚（见上方 GRM_*_PENALTY；中性值奖励函数内不下发）
+        +reward.custom_reward_function.reward_kwargs.grm_min_p=${GRM_MIN_P}
+        +reward.custom_reward_function.reward_kwargs.grm_repetition_penalty=${GRM_REPETITION_PENALTY}
+        +reward.custom_reward_function.reward_kwargs.grm_presence_penalty=${GRM_PRESENCE_PENALTY}
+        +reward.custom_reward_function.reward_kwargs.grm_frequency_penalty=${GRM_FREQUENCY_PENALTY}
         # 开思考的复杂审核任务输出较长，max_tokens 给大些（8192）避免 JSON 被截断。
         +reward.custom_reward_function.reward_kwargs.grm_max_tokens=8192
         # 打分与 rollout 重叠（reward loop），判分耗时大多被生成时间盖住；timeout 仍设上限防卡死。
@@ -543,6 +555,13 @@ elif [[ "${REWARD_MODE}" == "multi" ]]; then
     # 跑前提：med-exam 的外部 GenRM 已用 start_genrm_server.sh 起好并 curl 验证过。
     export GENRM_BASE_URL=${GENRM_BASE_URL:-"http://100.85.97.73:8000"}
     export GENRM_MODEL_NAME=${GENRM_MODEL_NAME:-"genrm_remote"}
+    # 防复读惩罚（env 可覆盖；中性值=不下发该键，server 不支持的键会报错暴露）。
+    # 实测（temp 0.7，server 路径，1596 样本）：presence_penalty 最有效（0→71、1.5→16 截断），
+    #   repetition_penalty=1.1 轻微叠加（→14），frequency_penalty 反而伤 JSON 标点导致乱码+更长（保持 0）。
+    GRM_MIN_P=${GRM_MIN_P:-0.0}
+    GRM_REPETITION_PENALTY=${GRM_REPETITION_PENALTY:-1.1}
+    GRM_PRESENCE_PENALTY=${GRM_PRESENCE_PENALTY:-1.5}
+    GRM_FREQUENCY_PENALTY=${GRM_FREQUENCY_PENALTY:-0.0}
     REWARD+=(
         # 不在集群内起 RM（med-exam 的 GenRM 在集群外），policy 用全部节点
         reward.reward_model.enable=False
@@ -551,10 +570,15 @@ elif [[ "${REWARD_MODE}" == "multi" ]]; then
         # med-exam 分支用：GenRM 地址 / 模型名 / 采样参数（经 reward_kwargs 下发，多机可达）
         +reward.custom_reward_function.reward_kwargs.grm_base_url=${GENRM_BASE_URL}
         +reward.custom_reward_function.reward_kwargs.grm_model_name=${GENRM_MODEL_NAME}
-        # 复读主要受温度影响（实测 temp 0.6→0.7→0.8 复读递减，top_k 无明显差异），不加任何惩罚。
+        # 复读主要受温度影响（实测 temp 0.6→0.7→0.8 复读递减，top_k 无明显差异）+ presence/repetition 惩罚兜底。
         +reward.custom_reward_function.reward_kwargs.grm_temperature=0.8
         +reward.custom_reward_function.reward_kwargs.grm_top_p=1.0
         +reward.custom_reward_function.reward_kwargs.grm_top_k=-1
+        # 防复读惩罚（见上方 GRM_*_PENALTY；中性值奖励函数内不下发）
+        +reward.custom_reward_function.reward_kwargs.grm_min_p=${GRM_MIN_P}
+        +reward.custom_reward_function.reward_kwargs.grm_repetition_penalty=${GRM_REPETITION_PENALTY}
+        +reward.custom_reward_function.reward_kwargs.grm_presence_penalty=${GRM_PRESENCE_PENALTY}
+        +reward.custom_reward_function.reward_kwargs.grm_frequency_penalty=${GRM_FREQUENCY_PENALTY}
         +reward.custom_reward_function.reward_kwargs.grm_max_tokens=8192
         +reward.custom_reward_function.reward_kwargs.grm_request_timeout=600
         +reward.custom_reward_function.reward_kwargs.grm_max_retries=1
