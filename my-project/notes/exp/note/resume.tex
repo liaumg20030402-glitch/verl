@@ -103,9 +103,9 @@
 \entry{科大讯飞股份有限公司 ---- 讯飞医疗大模型实习}{2025年12月 - 2026年06月}
 
 % -------- 环境搭建 --------
-\textbf{H200 多机 Post-training 训练环境从零搭建（SFT + GRPO）}
+\textbf{H200 多机大模型 Post-training 训练链路搭建（Qwen3.5-27B / 397B）}
 \begin{itemize}
-    \item 从零完成 H200 多机集群 + qwen3.5 post-training 训练环境部署和调试（verl / Megatron-LM / vLLM / Ray / Swift）；
+    \item 基于 verl /Swift/ Megatron-LM / vLLM  搭建 H200 多机后训练环境，调试训练脚本，支持 Qwen3.5-27B 的 SFT、GRPO/DAPO 训练与 Qwen3.5-397B 全量 SFT 链路验证；
     \item 调试解决训练过程中遇到的报错bug，如训练随机崩溃等，确保训练环境和脚本稳定可复用。
 \end{itemize}
 
@@ -113,9 +113,9 @@
 \begin{itemize}
     \item 基于 Swift 框架（Megatron后端）完成 Qwen3.5-27B 全量 SFT 训练（230 万条医学数据）；对 SFT 后 IFEval 指令遵循能力下降进行归因分析，定位为思维链缩短与训练数据分布偏移，提供改进建议。
 \end{itemize}
-\textbf{{SFT 医学数据全量微调与分析（Qwen3.5-27B）}}
+\textbf{{SFT 医学数据全量微调与分析（Qwen3.5-397B）}}
 \begin{itemize}
-    \item 基于 Swift 框架（Megatron后端）完成 Qwen3.5-27B 全量 SFT 训练（230 万条医学数据）；对 SFT 后 IFEval 指令遵循能力下降进行归因分析，定位为思维链缩短与训练数据分布偏移，提供改进建议。
+    \item 基于 Swift 框架（Megatron后端）完成 Qwen3.5-27B 全量 SFT 训练（3 万条体检报告单数据）；
 \end{itemize}
 
 % -------- 病历质控 GRPO --------

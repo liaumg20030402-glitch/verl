@@ -1,30 +1,25 @@
 """
-zyzl-blzk（智能助理-病历质控）规则奖励函数 —— 适配 verl + Qwen3.5。
+zyzl-blzk (智能助理-病历质控) 规则奖励函数 —— 适配 ver1 + Qwen3.5。
 
 与 blzk 不同：模型输出格式非常多样（表格 / JSON / 箭头 / Markdown / 列表 等约 28 种），
-因此沿用旧框架的「智能识别 + 多格式解析」逻辑：parse_answer 自动判别格式 → 解析成
-统一的 [{质检项名称, 质检结论, 推理过程}, ...] 结构 → 按质检项名称对齐后比对结论。
+因此沿用旧框架的「智能识别 + 多格式解析」逻辑：parse_answer 自动判别格式 -> 解析成
+统一的 [{质检项名称, 质检结论, 推理过程}, ...] 结构 -> 按质检项名称对齐后比对结论。
 
-适配说明（相对旧框架）：
-  - 去掉 sentencepiece tokenizer：verl 传进来的 solution_str / ground_truth 已是文本；
-  - thinking 处理对齐 Qwen3.5 原生 thinking：只看 `</think>`，不再处理 `<unused6>/<unused7>`；
-  - 入口函数改为 verl dapo/naive reward manager 约定的签名。
-
-核心解析 / 评分逻辑（parse_answer / parse_format_* / zyzl_blzk_content_reward_item）
+核心解析 / 评分逻辑 (parse_answer / parse_format_* / zyzl_blzk_content_reward_item)
 完全沿用旧框架代码。
 """
 
 import json
 import re
 
-# 旧框架部分 parse_format_* 用到 json_repair；环境没装也不影响导入。
+# 旧框架部分 parse_format_* 用到 json_repair; 环境没装也不影响导入。
 try:
     import json_repair
 except ImportError:
     json_repair = None
 
 
-# ==================== 格式0: 列表格式（带推理过程和结论）====================
+# ==================== 格式0: 列表格式 (带推理过程和结论) ====================
 def parse_format_0(text):
     """
     格式: <质检项名称>: 【推理过程】推理过程【质检结论】合格/不合格
@@ -40,15 +35,15 @@ def parse_format_0(text):
             continue
         # 保留尖括号
         name = line[:name_end].strip()
-
+        
         if '【推理过程】' in line and '【质检结论】' in line:
             reasoning_start = line.find('【推理过程】') + len('【推理过程】')
             reasoning_end = line.find('【质检结论】')
             reasoning = line[reasoning_start:reasoning_end].strip()
-
+            
             conclusion_start = line.find('【质检结论】') + len('【质检结论】')
             conclusion = line[conclusion_start:].strip()
-
+            
             if conclusion in ['合格', '不合格']:
                 result.append({
                     '质检项名称': name,
@@ -58,38 +53,39 @@ def parse_format_0(text):
     return result
 
 
-# ==================== 格式1: Markdown表格（3列）====================
+# ==================== 格式1: Markdown表格 (3列) ====================
+# ==================== 格式1: Markdown表格 (3列) ====================
 def parse_format_1(text):
     """
     格式: | 质检项 | 质检结论 | 质检依据 | 或 | 质检项 | 质检结论 | 质检解释说明 |
     """
     result = []
     lines = text.strip().split('\n')
-
+    
     in_table = False
     for line in lines:
         line = line.strip()
-
+        
         # 跳过空行
         if not line:
             continue
-
-        # 支持多种表头交接
-        if (line.replace(' ', '').startswith('|质检项|质检结论|质检依据|') or
-                line.replace(' ', '').startswith('|质检项|质检结论|质检解释说明|')):
+            
+        # 支持多种表头变体
+        if (line.replace(' ', '').startswith('|质检项|质检结论|质检依据|') or 
+            line.replace(' ', '').startswith('|质检项|质检结论|质检解释说明|')):
             in_table = True
             continue
-
+            
         # 跳过分隔行
         if in_table and '---' in line:
             continue
-
+            
         if in_table and line.startswith('|'):
             parts = line.split('|')
             # 清理单元格并过滤空值
             cells = [part.strip() for part in parts if part.strip()]
-
-            # 确保有足够的列数（至少3列）
+            
+            # 确保有足够的列数 (至少3列)
             if len(cells) >= 3:
                 # 检查结论是否有效
                 conclusion = cells[1]
@@ -102,7 +98,7 @@ def parse_format_1(text):
             else:
                 # 如果列数不够，可能表格结束
                 in_table = False
-
+                
     return result
 
 
@@ -128,15 +124,15 @@ def parse_format_2(text):
 # ==================== 格式3: JSON格式 ====================
 def parse_format_3(text):
     """
-    格式: {"质检项名称": {"质控结论":"合格/不合格", "质控依据":""}}
+    格式: {"质检项名称": {"质检结论":"合格/不合格", "质检依据":""}}
     """
     try:
         res_tem = json.loads(text)
-
+        
         # 如果是列表格式
         if isinstance(res_tem, list):
             return res_tem
-
+            
         # 如果是字典格式
         res = []
         for k in res_tem:
@@ -144,88 +140,521 @@ def parse_format_3(text):
             if isinstance(item_data, dict):
                 res.append({
                     '质检项名称': k,
-                    '推理过程': item_data.get('质控依据', item_data.get('质检依据', '')),
-                    '质检结论': item_data.get('质控结论', item_data.get('质检结论', ''))
+                    '推理过程': item_data.get('质检依据', item_data.get('质检依据', '')),
+                    '质检结论': item_data.get('质检结论', item_data.get('质检结论', ''))
                 })
         return res
     except Exception as e:
         return []
 
 
-# ============================================================================
-# ↓↓↓ 以下为旧框架中被省略的 parse_format_* / 辅助解析函数占位 ↓↓↓
-#     直接把你旧框架对应实现粘贴覆盖即可（函数名 / 签名保持不变）。
-#     默认返回 []，未粘贴前 parse_answer 命中这些分支会判 0 分，不影响导入与运行。
-# ============================================================================
-
-def parse_answer_markdown_single(s):
-    # TODO: 粘贴旧框架实现（### 推理过程 ... 单条 Markdown）
-    return []
-
-
+# ==================== 格式4: Markdown格式 (带质检依据和结论) ====================
 def parse_format_4(text):
-    # TODO: 粘贴旧框架实现（### Markdown，带 **质检结论**/**质控结论**）
-    return []
+    """
+    格式: ### 质检项名称
+        - **质检依据**...
+        - **质检结论**: 合格/不合格
+    """
+    result = []
+    lines = text.strip().split('\n')
+    current_item = None
+    current_data = {}
+    
+    for line in lines:
+        line = line.strip()
+        
+        # 跳过代码块标记
+        if line.startswith('```'):
+            continue
+            
+        if line.startswith('###'):
+            # 保存前一个质检项
+            if current_item and current_data:
+                result.append(current_data)
+                
+            # 开始新的质检项
+            current_item = line[3:].strip()
+            current_data = {
+                '质检项名称': current_item,
+                '推理过程': '',
+                '质检结论': ''
+            }
+        elif current_item:
+            # 处理质检依据/质控依据
+            if line.startswith('- **质检依据**') or line.startswith('- **质控依据**'):
+                # 使用分割方法提取内容
+                if '：' in line:
+                    parts = line.split('：', 1)
+                elif ':' in line:
+                    parts = line.split(':', 1)
+                else:
+                    continue
+                if len(parts) >= 2:
+                    current_data['推理过程'] = parts[1].strip()
+                    
+            # 处理质检结论/质控结论
+            elif line.startswith('- **质检结论**') or line.startswith('- **质控结论**'):
+                if '：' in line:
+                    parts = line.split('：', 1)
+                elif ':' in line:
+                    parts = line.split(':', 1)
+                else:
+                    continue
+                if len(parts) >= 2:
+                    current_data['质检结论'] = parts[1].strip()
+                    
+    # 添加最后一个质检项
+    if current_item and current_data:
+        result.append(current_data)
+        
+    return result
 
 
+# ==================== 格式5: 简单列表 (仅结论) ====================
 def parse_format_5(text):
-    # TODO: 粘贴旧框架实现（简单列表，仅结论；带【】）
-    return []
+    """
+    格式: <质检项名称>: 合格/不合格
+    """
+    result = []
+    lines = text.strip().split('\n')
+    for line in lines:
+        line = line.replace(':', '：').strip()
+        if not line:
+            continue
+        name_end = line.find('：')
+        if name_end == -1:
+            continue
+        # 保留尖括号
+        name = line[:name_end].strip()
+        conclusion = line[name_end+1:].strip()
+        if conclusion in ['合格', '不合格']:
+            result.append({
+                '质检项名称': name,
+                '推理过程': '',
+                '质检结论': conclusion
+            })
+    return result
 
 
-def parse_format_6(text):
-    # TODO: 粘贴旧框架实现（<尖括号> 名称 + 结论）
-    return []
+# ==================== 格式6,10,14: 列表格式 (仅解释说明) ====================
+def parse_format_6(text, output_type='all'):
+    """
+    格式: <质检项名称>: 质检解释说明
+    output_type: 'all' - 所有项, 'unqualified' - 仅不合格, 'qualified' - 仅合格
+    """
+    result = []
+    lines = text.strip().split('\n')
+    for line in lines:
+        line = line.replace(':', '：').strip()
+        if not line:
+            continue
+        name_end = line.find('：')
+        if name_end == -1:
+            continue
+        # 保留尖括号
+        name = line[:name_end].strip()
+        reasoning = line[name_end+1:].strip()
+        result.append({
+            '质检项名称': name,
+            '推理过程': reasoning,
+        })
+    return result
 
 
-def parse_format_7(text):
-    # TODO: 粘贴旧框架实现（键值对：质检项名称: ...）
-    return []
+# ==================== 格式7,11,15: 键值对格式 ====================
+def parse_format_7(text, output_type='all'):
+    """
+    格式: 质检项名称：xxx
+          解释说明：xxx
+    output_type: 'all' - 所有项, 'unqualified' - 仅不合格, 'qualified' - 仅合格
+    """
+    result = []
+    lines = text.strip().split('\n')
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if line.startswith('质检项名称') or '质检项名称：' in line:
+            name = line.split('：')[-1].strip()
+            reasoning = ''
+            if i + 1 < len(lines) and ('解释说明' in lines[i+1]):
+                reasoning = lines[i+1].split('：')[-1].strip()
+                i += 1
+            result.append({
+                '质检项名称': name,
+                '推理过程': reasoning,
+            })
+        i += 1
+    return result
 
 
-def parse_format_8(text):
-    # TODO: 粘贴旧框架实现（### Markdown，无结论标记）
-    return []
+# ==================== 格式8,12,16: Markdown格式 (仅解释说明) ====================
+def parse_format_8(text, output_type='all'):
+    """
+    格式: ### 质检项名称
+          质检解释说明
+    output_type: 'all' - 所有项, 'unqualified' - 仅不合格, 'qualified' - 仅合格
+    """
+    result = []
+    lines = text.strip().split('\n')
+    current_item = None
+    current_reasoning = []
+    
+    for line in lines:
+        line = line.strip()
+        if line.startswith('###'):
+            if current_item:
+                result.append({
+                    '质检项名称': current_item,
+                    '推理过程': '\n'.join(current_reasoning).strip()
+                })
+            current_item = line[3:].strip()
+            current_reasoning = []
+        elif current_item and line and not line.startswith('```'):
+            current_reasoning.append(line)
+            
+    if current_item:
+        result.append({
+            '质检项名称': current_item,
+            '推理过程': '\n'.join(current_reasoning).strip()
+        })
+    return result
+
+# ==================== 格式9,13,17: Markdown表格 (2列) ====================
+def parse_format_9(text, output_type='all'):
+    """
+    格式: | 质检项 | 质检依据 |
+    output_type: 'all' - 所有项, 'unqualified' - 仅不合格, 'qualified' - 仅合格
+    """
+    result = []
+    lines = text.strip().split('\n')
+    
+    in_table = False
+    for line in lines:
+        line = line.strip()
+        if line.startswith('| 质检项 | 质检依据 |'):
+            in_table = True
+            continue
+        if in_table and line.startswith('|') and '---' not in line:
+            parts = line.split('|')
+            if len(parts) >= 3:
+                cells = [part.strip() for part in parts[1:-1]]
+                if len(cells) >= 2:
+                    result.append({
+                        '质检项名称': cells[0],
+                        '推理过程': cells[1],
+                    })
+    return result
 
 
-def parse_format_9(text):
-    # TODO: 粘贴旧框架实现（2列表格：| 质检项 | 质检依据 |）
-    return []
-
-
+# ==================== 格式18: Markdown格式 (带编码) ====================
 def parse_format_18(text):
-    # TODO: 粘贴旧框架实现（### Markdown，带 **质检项编码**）
-    return []
+    """
+    格式: ### 质检项名称
+          - **质检项编码**: xxx
+          - **质检依据**: xxx
+          - **质检结论**: 合格/不合格
+    """
+    result = []
+    lines = text.strip().split('\n')
+    current_item = None
+    current_data = {}
+    
+    for line in lines:
+        line = line.strip()
+        if line.startswith('###'):
+            if current_item and current_data:
+                result.append(current_data)
+            current_item = line[3:].strip()
+            current_data = {
+                '质检项名称': current_item,
+                '推理过程': '',
+                '质检结论': '',
+            }
+        elif current_item:
+            if '**质检项编码**' in line:
+                line = line.replace(':', '：')
+                parts = line.split('：')
+                if len(parts) >= 2:
+                    current_data['质检项编码'] = parts[1].strip()
+            elif '**质检依据**' in line or '**质控依据**' in line:
+                line = line.replace(':', '：')
+                parts = line.split('：')
+                if len(parts) >= 2:
+                    current_data['推理过程'] = parts[1].strip()
+            elif '**质检结论**' in line or '**质控结论**' in line:
+                line = line.replace(':', '：')
+                parts = line.split('：')
+                if len(parts) >= 2:
+                    current_data['质检结论'] = parts[1].strip()
+                    
+    if current_item and current_data:
+        result.append(current_data)
+    return result
 
 
+# ==================== 格式19: Markdown表格 (4列, 带编码) ====================
 def parse_format_19(text):
-    # TODO: 粘贴旧框架实现（4列表格，带编码：| 质检项编码 | ... |）
-    return []
+    """
+    格式: | 质检项 | 质检项编码 | 质检结论 | 质检依据 |
+    """
+    result = []
+    lines = text.strip().split('\n')
+    
+    in_table = False
+    for line in lines:
+        line = line.strip()
+        if line.startswith('| 质检项 | 质检项编码 | 质检结论 | 质检依据 |'):
+            in_table = True
+            continue
+        if in_table and line.startswith('|') and '---' not in line:
+            parts = line.split('|')
+            if len(parts) >= 5:
+                cells = [part.strip() for part in parts[1:-1]]
+                if len(cells) >= 4:
+                    result.append({
+                        '质检项名称': cells[0],
+                        '质检结论': cells[2],
+                        '推理过程': cells[3]
+                    })
+    return result
 
 
+# ==================== 格式20: 键值对格式 (带编码) ====================
 def parse_format_20(text):
-    # TODO: 粘贴旧框架实现（键值对，含质检项编码）
-    return []
+    """
+    格式: 质检项名称：xxx
+          质检项编码：xxx
+          质检结论：xxx
+          解释说明：xxx
+    """
+    result = []
+    lines = text.strip().split('\n')
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if line.startswith('质检项名称') or '质检项名称： ' in line:
+            name = line.split('：')[-1].strip()
+            code = ''
+            conclusion = ''
+            reasoning = ''
+            
+            # 查找后续的相关信息
+            j = i + 1
+            while j < len(lines) and j < i + 4:  # 最多往后找3行
+                next_line = lines[j].strip()
+                if '质检项编码' in next_line:
+                    code = next_line.split('：')[-1].strip()
+                elif '质检结论' in next_line:
+                    conclusion = next_line.split('：')[-1].strip()
+                elif '解释说明' in next_line:
+                    reasoning = next_line.split('：')[-1].strip()
+                j += 1
+                
+            result.append({
+                '质检项名称': name,
+                '质检结论': conclusion,
+                '推理过程': reasoning
+            })
+            i = j - 1  # 跳过已处理的行
+        i += 1
+    return result
 
 
+# ==================== 格式21,22: 仅编码列表====================
 def parse_format_21(text):
-    # TODO: 粘贴旧框架实现（质检项编码: ... / 短字符串编码列表）
-    return []
+    """
+    格式: 质检项编码 (每行一个, 仅不合格)
+    """
+    result = []
+    lines = text.strip().split('\n')
+    for line in lines:
+        code = line.strip()
+        if code:
+            result.append({
+                '质检项名称': code,
+                '推理过程': '',
+            })
+    return result
 
 
+# ==================== 格式23,25: 编码+解释====================
 def parse_format_23(text):
-    # TODO: 粘贴旧框架实现（质检项编码: ... 带解释说明）
-    return []
+    """
+    格式: 质检项编码：xxx
+          解释说明：xxx (仅合格)
+    """
+    result = []
+    lines = text.strip().split('\n')
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if line.startswith('质检项编码') or '质检项编码： ' in line:
+            code = line.split('：')[-1].strip()
+            reasoning = ''
+            if i + 1 < len(lines) and '解释说明' in lines[i+1]:
+                reasoning = lines[i+1].split('：')[-1].strip()
+                i += 1
+            result.append({
+                '质检项名称': code,
+                '推理过程': reasoning,
+            })
+        i += 1
+    return result
 
 
+# ==================== 格式24,26: 编码表格====================
 def parse_format_24(text):
-    # TODO: 粘贴旧框架实现（表格：| 质检项编码 | 质检依据 |）
-    return []
+    """
+    格式: | 质检项编码 | 质检依据 | (仅合格)
+    一个更健壮的版本。
+    """
+    result = []
+    lines = text.strip().split('\n')
+    
+    in_table = False
+    for line in lines:
+        # 1. 先对整行进行处理，去除首尾空白
+        stripped_line = line.strip()
+        
+        # 2. 如果是空行，直接跳过
+        if not stripped_line:
+            continue
+            
+        # 3. 检查是否为表头，并激活表格模式
+        if stripped_line.startswith('| 质检项编码 | 质检依据 |'):
+            in_table = True
+            continue
+            
+        # 4. 如果处于表格模式，则处理数据行
+        if in_table:
+            # 检查是否为分隔行 (如: | --- | --- |)
+            # 如果是，则跳过
+            if '---' in stripped_line:
+                continue
+                
+            # 检查该行是否仍然是表格格式（以 | 开头和结尾）
+            # 如果不是，则认为表格结束，退出表格模式
+            if stripped_line.startswith('|') and stripped_line.endswith('|'):
+                # 按 | 分割，并去除每个单元格两边的空白
+                cells = [cell.strip() for cell in stripped_line.split('|') if cell.strip()]
+                
+                # 确保分割后有预期的列数
+                if len(cells) >= 2:
+                    result.append({
+                        '质检项名称': cells[0],
+                        '推理过程': cells[1],
+                    })
+            else:
+                # 遇到非表格行，退出表格模式
+                in_table = False
+                
+    return result
 
-
+# ==================== 格式27: 分组格式 (合格/不合格分开) ====================
 def parse_format_27(text):
-    # TODO: 粘贴旧框架实现（## 合格 / 不合格 分组格式）
-    return []
+    """
+    格式: ## 合格的质检项
+          ### 质检项名称
+          解释说明
+          
+          ## 不合格的质检项
+          ### 质检项名称
+          解释说明
+    """
+    result = []
+    lines = text.strip().split('\n')
+    current_group = None # 'qualified' or 'unqualified'
+    current_item = None
+    current_reasoning = []
+    
+    for line in lines:
+        line = line.strip()
+        if line.startswith('## 合格'):
+            # 保存前一个质检项
+            if current_item:
+                conclusion = '合格' if current_group == 'qualified' else '不合格'
+                result.append({
+                    '质检项名称': current_item,
+                    '推理过程': '\n'.join(current_reasoning).strip(),
+                    '质检结论': conclusion
+                })
+            current_group = 'qualified'
+            current_item = None
+            current_reasoning = []
+        elif line.startswith('## 不合格'):
+            # 保存前一个质检项
+            if current_item:
+                conclusion = '合格' if current_group == 'qualified' else '不合格'
+                result.append({
+                    '质检项名称': current_item,
+                    '推理过程': '\n'.join(current_reasoning).strip(),
+                    '质检结论': conclusion
+                })
+            current_group = 'unqualified'
+            current_item = None
+            current_reasoning = []
+        elif line.startswith('###'):
+            # 保存前一个质检项
+            if current_item and current_group:
+                conclusion = '合格' if current_group == 'qualified' else '不合格'
+                result.append({
+                    '质检项名称': current_item,
+                    '推理过程': '\n'.join(current_reasoning).strip(),
+                    '质检结论': conclusion
+                })
+            current_item = line[3:].strip()
+            current_reasoning = []
+        elif current_item and line and not line.startswith('```'):
+            current_reasoning.append(line)
+            
+    # 保存最后一个质检项
+    if current_item and current_group:
+        conclusion = '合格' if current_group == 'qualified' else '不合格'
+        result.append({
+            '质检项名称': current_item,
+            '推理过程': '\n'.join(current_reasoning).strip(),
+            '质检结论': conclusion
+        })
+        
+    return result
+
+# ==================== 格式28: 分组格式 (JSON) ====================
+
+def parse_answer_markdown_single(text):
+    # 定义关键标识
+    reasoning_marker_1 = "### 推理过程"
+    conclusion_marker_1 = "### 质检结论"
+    
+    # 初始化结果字典
+    result = {
+        "推理过程": "",
+        "质检结论": ""
+    }
+    
+    # 分割文本行
+    lines = text.split('\n')
+    
+    # 寻找推理过程部分
+    for i, line in enumerate(lines):
+        if line.strip() in [reasoning_marker_1]:
+            # 收集推理过程内容直到下一个标记或文件结束
+            reasoning_lines = []
+            j = i + 1
+            while j < len(lines) and not lines[j].strip().startswith("###"):
+                reasoning_lines.append(lines[j].strip())
+                j += 1
+            result["推理过程"] = "\n".join(reasoning_lines).strip()
+            break
+            
+    # 寻找质检结论部分
+    for i, line in enumerate(lines):
+        if line.strip() in [conclusion_marker_1]:
+            # 获取结论内容
+            if i + 1 < len(lines):
+                result["质检结论"] = lines[i + 1].strip()
+            break
+            
+    return result
 
 # ============================================================================
 # ↑↑↑ 占位结束 ↑↑↑
