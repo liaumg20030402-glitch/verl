@@ -113,22 +113,18 @@
 \begin{itemize}
     \item 基于 Swift 框架（Megatron后端）完成 Qwen3.5-27B 全量 SFT 训练（230 万条医学数据）；对 SFT 后 IFEval 指令遵循能力下降进行归因分析，定位为思维链缩短与训练数据分布偏移，提供改进建议。
 \end{itemize}
-\textbf{{SFT 医学数据全量微调与分析（Qwen3.5-397B）}}
-\begin{itemize}
-    \item 基于 Swift 框架（Megatron后端）完成 Qwen3.5-27B 全量 SFT 训练（3 万条体检报告单数据）；
-\end{itemize}
 
 % -------- 病历质控 GRPO --------
 \textbf{病历质控规则奖励 GRPO 训练（Qwen3.5-27B ）}
 \begin{itemize}
     \item 基于 verl 框架（Megatron + vLLM ），使用 6 万条病历质控数据对 Qwen3.5-27B 进行 GRPO 训练；
     \item 设计规则奖励函数，产出 0/1 奖励及 \texttt{judge\_reason} 分类标签（ok / mismatch / json\_not\_found 等）实时监控训练质量。
-    \item 在 2{,}000 条验收集上 F1 值从基线 \textbf{87.4\%} 提升至 \textbf{89.27\%}；观察到精确率上升、召回率下降，分析为模型趋向保守输出；
+    \item 在 2{,}000 条验收集上 F1 值从基线 \textbf{87.4\%} 提升至 \textbf{89.27\%}；
     \item 进行不同训练数据难度配比实验和DAPO、Maxrl对照实验分析实验结果。
 \end{itemize}
 
 % -------- 病历生成 GenRM --------
-\textbf{病历生成 GenRM GRPO 训练}
+\textbf{病历生成 GenRM GRPO 训练（Qwen3.5-27B）}
 \begin{itemize}
     \item 从医患对话自动生成结构化病历（开放式任务，无标准答案）；Qwen3.5-27B 与 SFT 版本 LLM-as-Judge 评分均不理想，
     \item 设计生成式奖励模型评分维度，构建对应评测 prompt 与 rubric，以对齐人工评估标准；

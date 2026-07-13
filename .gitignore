@@ -67,7 +67,7 @@ output.txt
 *.pot
 
 # Django stuff:
-*.log
+# *.log
 local_settings.py
 
 # Flask stuff:
@@ -127,7 +127,7 @@ ENV/
 
 
 # local logs
-logs
-log
+# logs
+# log
 outputs
 .history
