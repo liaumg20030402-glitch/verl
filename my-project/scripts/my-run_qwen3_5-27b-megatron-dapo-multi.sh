@@ -319,7 +319,7 @@ DATA=(
     # NNODES=2 TP=4 → DP=4, minimal_bsz=4    train_batch × rollout.n % minimal_bsz == 0
     # NNODES=4 TP=4 → DP=8, minimal_bsz=8    
     # NNODES=6 TP=4 → DP=12, minimal_bsz=12  
-    data.train_batch_size=480
+    data.train_batch_size=1920
     data.max_prompt_length=8192
     data.max_response_length=16384
     data.truncation='error'
@@ -346,7 +346,7 @@ ACTOR=(
     # verl 里 train_batch_size 和 ppo_mini_batch_size 的单位都是 prompt 数
     # 必须 train_batch % mini_batch == 0
     # mini_batch × rollout.n % minimal_bsz == 0
-    actor_rollout_ref.actor.ppo_mini_batch_size=120
+    actor_rollout_ref.actor.ppo_mini_batch_size=480
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
     # use_dynamic_bsz=False 时这行无效（GDN 必须 False）
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096
@@ -571,9 +571,9 @@ elif [[ "${REWARD_MODE}" == "multi" ]]; then
         +reward.custom_reward_function.reward_kwargs.grm_base_url=${GENRM_BASE_URL}
         +reward.custom_reward_function.reward_kwargs.grm_model_name=${GENRM_MODEL_NAME}
         # 复读主要受温度影响（实测 temp 0.6→0.7→0.8 复读递减，top_k 无明显差异）+ presence/repetition 惩罚兜底。
-        +reward.custom_reward_function.reward_kwargs.grm_temperature=0.8
-        +reward.custom_reward_function.reward_kwargs.grm_top_p=1.0
-        +reward.custom_reward_function.reward_kwargs.grm_top_k=-1
+        +reward.custom_reward_function.reward_kwargs.grm_temperature=1.0
+        +reward.custom_reward_function.reward_kwargs.grm_top_p=0.95
+        +reward.custom_reward_function.reward_kwargs.grm_top_k=20
         # 防复读惩罚（见上方 GRM_*_PENALTY；中性值奖励函数内不下发）
         +reward.custom_reward_function.reward_kwargs.grm_min_p=${GRM_MIN_P}
         +reward.custom_reward_function.reward_kwargs.grm_repetition_penalty=${GRM_REPETITION_PENALTY}
